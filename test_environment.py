@@ -13,6 +13,7 @@ def main() -> None:
     print("SciPy:", scipy.__version__)
     print("SimPy:", simpy.__version__)
     print("test Git ...")
+    print("test Git 두번째 ...")
 
     probabilities = np.array([0.5, 0.3, 0.2])
     entropy = -np.sum(probabilities * np.log2(probabilities))
