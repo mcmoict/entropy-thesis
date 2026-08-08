@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/entropy-thesis/config.schema.json",
+  "title": "Entropy Thesis Experiment Configuration",
+  "description": "Schema for the JSON-equivalent form of configs/baseline.yaml. Rates are measured per simulation time unit.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "experiment",
+    "warehouse",
+    "simulation",
+    "allocation",
+    "output"
+  ],
+  "properties": {
+    "experiment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed", "replications"],
+      "properties": {
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replications": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "warehouse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_workers", "zones"],
+      "properties": {
+        "total_workers": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "zones": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/zone"
+          }
+        }
+      }
+    },
+    "simulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration", "warm_up", "arrival_rate"],
+      "properties": {
+        "duration": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "warm_up": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Must be less than duration."
+        },
+        "arrival_rate": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Jobs arriving per simulation time unit."
+        }
+      }
+    },
+    "allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["methods"],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "random",
+              "equal",
+              "volume_proportional",
+              "entropy_based"
+            ]
+          }
+        },
+        "entropy_weight": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1.0
+        },
+        "minimum_per_zone": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["directory"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "volume_share", "service_rate"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "volume_share": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Zone share; zero-demand zones are allowed, at least one share must be positive, and all shares must sum to 1."
+        },
+        "service_rate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Jobs completed by one worker per simulation time unit."
+        }
+      }
+    }
+  }
+}

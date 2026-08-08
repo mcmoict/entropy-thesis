@@ -1,0 +1,12 @@
+# Portable direct-dependency snapshot for the validated Python 3.13 environment.
+# Transitive packages are resolved by pip for the target operating system.
+-e .[dev,notebook]
+jsonschema==4.25.1
+jupyterlab==4.5.9
+matplotlib==3.11.0
+numpy==2.5.1
+pandas==3.0.3
+PyYAML==6.0.3
+pytest==9.1.1
+scipy==1.18.0
+simpy==4.1.2

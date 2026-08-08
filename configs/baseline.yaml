@@ -1,0 +1,33 @@
+experiment:
+  seed: 42
+  replications: 30
+
+warehouse:
+  total_workers: 30
+  zones:
+    - id: A
+      volume_share: 0.50
+      service_rate: 0.10
+    - id: B
+      volume_share: 0.30
+      service_rate: 0.10
+    - id: C
+      volume_share: 0.20
+      service_rate: 0.10
+
+simulation:
+  duration: 480
+  warm_up: 60
+  arrival_rate: 2.7
+
+allocation:
+  methods:
+    - random
+    - equal
+    - volume_proportional
+    - entropy_based
+  entropy_weight: 1.0
+  minimum_per_zone: 1
+
+output:
+  directory: results

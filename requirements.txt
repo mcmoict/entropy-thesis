@@ -1,0 +1,4 @@
+# Runtime dependencies are declared once in pyproject.toml.
+# This editable install keeps the legacy `pip install -r` workflow portable.
+-e .
+
