@@ -49,3 +49,25 @@ def test_unknown_location_is_not_invented():
     result = warehouse.resolve_location("RC-01")
     assert not result.resolved
     assert result.node_id is None
+
+
+def test_deterministic_build_is_stable_when_storage_input_order_changes():
+    supports = [
+        support("LC-01", 0.0, 0.0),
+        support("CC-01", 4.0, 0.0),
+        support("LC-02", 0.0, 1.0),
+        support("CC-02", 4.0, 1.0),
+    ]
+    locations = [
+        storage("A-01-11", 1.0, 0.1),
+        storage("A-01-12", 1.0, 0.1),
+        storage("B-01-11", 3.0, 0.9),
+    ]
+    first = WarehouseGraph.build(locations, supports, deterministic_order=True)
+    second = WarehouseGraph.build(
+        list(reversed(locations)), supports, deterministic_order=True
+    )
+
+    first_edges = {frozenset(edge) for edge in first.graph.edges}
+    second_edges = {frozenset(edge) for edge in second.graph.edges}
+    assert first_edges == second_edges

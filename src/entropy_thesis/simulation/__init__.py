@@ -24,6 +24,15 @@ from .data_loader import (
     load_storage_locations,
     load_support_points,
 )
+from .spatial_metrics import (
+    ActivityInterval,
+    CellOccupancyMetrics,
+    SpatialEntropySample,
+    aggregate_cell_occupancy,
+    build_activity_intervals,
+    sample_spatial_entropy,
+)
+from .traffic import CongestionWaitEvent, TrafficController
 from .warehouse import LocationResolution, Route, WarehouseGraph, WarehouseGraphStats
 from .worker import (
     MovementEvent,
@@ -41,6 +50,9 @@ __all__ = [
     "ZoneConfig",                # 최초버전
     "simulate_warehouse",        # 최초버전
 
+    "ActivityInterval",
+    "CellOccupancyMetrics",
+    "CongestionWaitEvent",
     "CustomerOrderLine",
     "DatasetBundle",
     "LocationResolution",
@@ -50,12 +62,16 @@ __all__ = [
     "PickingList",
     "Product",
     "Route",
+    "SpatialEntropySample",
     "StorageLocation",
     "SupportPoint",
+    "TrafficController",
     "UnresolvedPickEvent",
     "WarehouseGraph",
     "WarehouseGraphStats",
     "Worker",
+    "aggregate_cell_occupancy",
+    "build_activity_intervals",
     "create_workers_from_picking_lists",
     "load_customer_orders",
     "load_dataset",
@@ -63,4 +79,5 @@ __all__ = [
     "load_products",
     "load_storage_locations",
     "load_support_points",
+    "sample_spatial_entropy",
 ]

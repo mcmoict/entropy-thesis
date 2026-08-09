@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import pairwise
+import heapq
 from typing import Iterable
 
 import networkx as nx
@@ -65,6 +66,8 @@ class WarehouseGraph:
         cls,
         storage_locations: Iterable[StorageLocation],
         support_points: Iterable[SupportPoint],
+        *,
+        deterministic_order: bool = False,
     ) -> "WarehouseGraph":
         storage = list(storage_locations)
         supports = list(support_points)
@@ -130,7 +133,14 @@ class WarehouseGraph:
 
         # 4) 같은 horizontal aisle에서 x 순서로 인접 노드 연결
         for _, node_ids in aisle_nodes_by_y.items():
-            ordered = sorted(node_ids, key=lambda n: graph.nodes[n]["x_m"])
+            ordered = sorted(
+                node_ids,
+                key=(
+                    (lambda n: (graph.nodes[n]["x_m"], n))
+                    if deterministic_order
+                    else (lambda n: graph.nodes[n]["x_m"])
+                ),
+            )
             for a, b in pairwise(ordered):
                 if a != b:
                     cls._add_edge(graph, a, b, edge_kind="picking_aisle")
@@ -211,6 +221,55 @@ class WarehouseGraph:
             self.graph, start_node, end_node, weight="weight"
         )
         return Route(nodes=tuple(nodes), distance_m=float(distance))
+
+    def deterministic_shortest_route(self, start_node: str, end_node: str) -> Route:
+        """Return a reproducible shortest route for edge-level Phase 2 metrics.
+
+        The primary objective is the original metric distance.  When multiple
+        paths have exactly the same distance, the route with fewer edges is
+        preferred and then the lexicographically smaller node sequence is
+        chosen.  This prevents Python hash/set iteration order from changing
+        Phase 2 congestion results while leaving the Phase 1 routing method
+        untouched.
+        """
+
+        if start_node not in self.graph or end_node not in self.graph:
+            raise nx.NodeNotFound(f"unknown route endpoint: {start_node}, {end_node}")
+        if start_node == end_node:
+            return Route(nodes=(start_node,), distance_m=0.0)
+
+        start_path = (start_node,)
+        best: dict[str, tuple[float, int, tuple[str, ...]]] = {
+            start_node: (0.0, 0, start_path)
+        }
+        queue: list[tuple[float, int, tuple[str, ...], str]] = [
+            (0.0, 0, start_path, start_node)
+        ]
+
+        while queue:
+            distance, hops, path, node = heapq.heappop(queue)
+            state = (distance, hops, path)
+            if best.get(node) != state:
+                continue
+            if node == end_node:
+                return Route(nodes=path, distance_m=distance)
+
+            for neighbor in sorted(self.graph.neighbors(node)):
+                edge_distance = float(self.graph.edges[node, neighbor]["distance_m"])
+                candidate = (
+                    distance + edge_distance,
+                    hops + 1,
+                    path + (neighbor,),
+                )
+                previous = best.get(neighbor)
+                if previous is None or candidate < previous:
+                    best[neighbor] = candidate
+                    heapq.heappush(
+                        queue,
+                        (candidate[0], candidate[1], candidate[2], neighbor),
+                    )
+
+        raise nx.NetworkXNoPath(f"No path between {start_node} and {end_node}")
 
     def route_between_locations(self, start_location: str, end_location: str) -> Route:
         return self.shortest_route(

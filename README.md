@@ -147,6 +147,22 @@ entropy-thesis --config configs/overload.yaml
 엔트로피 민감도 분석은 같은 시나리오에서 `entropy_weight`만 바꿔 별도 출력 디렉터리로
 실행합니다. 설정과 seed가 같으면 결과가 동일합니다.
 
+## 실제 데이터 Phase 1 / Phase 2
+
+실제 CSV 기반 창고 graph 검증은 다음 명령으로 실행합니다.
+
+```bash
+python -m entropy_thesis.simulation.phase1 --data-dir data/raw
+```
+
+Phase 2의 실제 picking schedule 기반 이동거리·혼잡·공간 엔트로피 계산은 다음과 같습니다.
+
+```bash
+python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
+```
+
+세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`를 참고합니다.
+
 ## 모델 범위와 한계
 
 현재 구현은 논문 실험의 최소 기준 모델입니다. Shannon 엔트로피는 **구역 간 작업자

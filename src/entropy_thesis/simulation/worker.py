@@ -7,6 +7,7 @@ from typing import Literal
 import simpy
 
 from .data_loader import PickTask, PickingList
+from .traffic import TrafficController
 from .warehouse import WarehouseGraph
 
 
@@ -67,6 +68,7 @@ class Worker:
         walking_speed_mps: float = 1.2,
         pick_seconds_per_unit: float = 3.0,
         unresolved_policy: UnresolvedPolicy = "skip",
+        traffic_controller: TrafficController | None = None,
     ) -> None:
         if walking_speed_mps <= 0:
             raise ValueError("walking_speed_mps는 0보다 커야 합니다.")
@@ -82,6 +84,7 @@ class Worker:
         self.walking_speed_mps = walking_speed_mps
         self.pick_seconds_per_unit = pick_seconds_per_unit
         self.unresolved_policy = unresolved_policy
+        self.traffic_controller = traffic_controller
 
         self.total_distance_m = 0.0
         self.total_picked_units = 0.0
@@ -90,16 +93,39 @@ class Worker:
         self.unresolved_pick_events: list[UnresolvedPickEvent] = []
 
     def move_to_node(self, target_node: str, *, wave_number: str):
-        route = self.warehouse.shortest_route(self.current_node, target_node)
+        route = (
+            self.warehouse.shortest_route(self.current_node, target_node)
+            if self.traffic_controller is None
+            else self.warehouse.deterministic_shortest_route(
+                self.current_node, target_node
+            )
+        )
 
         for from_node, to_node in pairwise(route.nodes):
             distance_m = self.warehouse.edge_distance(from_node, to_node)
             travel_seconds = distance_m / self.walking_speed_mps
-            started_at = float(self.env.now)
 
-            yield self.env.timeout(travel_seconds)
+            if self.traffic_controller is None:
+                started_at = float(self.env.now)
+                yield self.env.timeout(travel_seconds)
+                finished_at = float(self.env.now)
+            else:
+                resource = self.traffic_controller.edge_resource(from_node, to_node)
+                requested_at = float(self.env.now)
+                with resource.request() as request:
+                    yield request
+                    started_at = float(self.env.now)
+                    self.traffic_controller.record_edge_wait(
+                        worker_id=self.worker_id,
+                        wave_number=wave_number,
+                        from_node=from_node,
+                        to_node=to_node,
+                        requested_at=requested_at,
+                        entered_at=started_at,
+                    )
+                    yield self.env.timeout(travel_seconds)
+                    finished_at = float(self.env.now)
 
-            finished_at = float(self.env.now)
             self.current_node = to_node
             self.total_distance_m += distance_m
             self.movement_events.append(
@@ -146,9 +172,25 @@ class Worker:
         )
 
         pick_seconds = task.quantity_units * self.pick_seconds_per_unit
-        started_at = float(self.env.now)
-        yield self.env.timeout(pick_seconds)
-        finished_at = float(self.env.now)
+        if self.traffic_controller is None:
+            started_at = float(self.env.now)
+            yield self.env.timeout(pick_seconds)
+            finished_at = float(self.env.now)
+        else:
+            resource = self.traffic_controller.pick_node_resource(resolution.node_id)
+            requested_at = float(self.env.now)
+            with resource.request() as request:
+                yield request
+                started_at = float(self.env.now)
+                self.traffic_controller.record_pick_node_wait(
+                    worker_id=self.worker_id,
+                    wave_number=task.wave_number,
+                    node_id=resolution.node_id,
+                    requested_at=requested_at,
+                    entered_at=started_at,
+                )
+                yield self.env.timeout(pick_seconds)
+                finished_at = float(self.env.now)
 
         self.total_picked_units += task.quantity_units
         self.pick_events.append(
@@ -183,6 +225,7 @@ def create_workers_from_picking_lists(
     walking_speed_mps: float = 1.2,
     pick_seconds_per_unit: float = 3.0,
     unresolved_policy: UnresolvedPolicy = "skip",
+    traffic_controller: TrafficController | None = None,
 ) -> dict[str, Worker]:
     operator_ids = sorted({p.operator for p in picking_lists if p.operator})
     return {
@@ -193,6 +236,7 @@ def create_workers_from_picking_lists(
             walking_speed_mps=walking_speed_mps,
             pick_seconds_per_unit=pick_seconds_per_unit,
             unresolved_policy=unresolved_policy,
+            traffic_controller=traffic_controller,
         )
         for operator_id in operator_ids
     }

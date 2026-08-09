@@ -35,7 +35,11 @@ Thumbs.db
 data/processed/**
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-results/**
+
+#results/** # 결과 변경여부도 알 수 있도록 ignore 대상에서 제외함. 2026-08-09
+results/figures/** # results 나머지 파일들은 ignore 처리
+results/.gitkeep # results 나머지 파일들은 ignore 처리
+
 !results/.gitkeep
 !results/figures/
 !results/figures/.gitkeep

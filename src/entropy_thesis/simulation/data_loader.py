@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Callable, Iterable, Literal
 
 import pandas as pd
 
@@ -434,30 +434,64 @@ def load_dataset(
     data_dir: str | Path,
     *,
     coordinate_unit: CoordinateUnit = "centimeter",
+    progress_callback: Callable[[str, int, int, Path], None] | None = None,
 ) -> DatasetBundle:
-    """사용자가 업로드한 5개 CSV를 한 번에 읽는 편의 함수."""
+    """사용자가 업로드한 5개 CSV를 한 번에 읽는 편의 함수.
+
+    ``progress_callback``은 CLI 진행상태 표시용 선택적 hook이다. 콜백은
+    ``(state, completed, total, path)``를 받으며 state는 ``start`` 또는
+    ``done``이다. 기존 호출자는 콜백을 넘기지 않으면 종전과 동일하다.
+    """
 
     data_dir = Path(data_dir)
-    products = load_products(data_dir / "Product.csv")
-    customer_orders = load_customer_orders(data_dir / "Customer_Order.csv")
+    total_files = 5
+    completed = 0
+
+    def notify(state: str, path: Path) -> None:
+        if progress_callback is not None:
+            progress_callback(state, completed, total_files, path)
+
+    product_path = data_dir / "Product.csv"
+    notify("start", product_path)
+    products = load_products(product_path)
+    completed += 1
+    notify("done", product_path)
+
+    customer_order_path = data_dir / "Customer_Order.csv"
+    notify("start", customer_order_path)
+    customer_orders = load_customer_orders(customer_order_path)
+    completed += 1
+    notify("done", customer_order_path)
+
+    picking_wave_path = data_dir / "Picking_Wave.csv"
+    notify("start", picking_wave_path)
     picking_lists = load_picking_lists(
-        data_dir / "Picking_Wave.csv",
-        data_dir / "Customer_Order.csv",
-        data_dir / "Product.csv",
+        picking_wave_path,
+        customer_order_path,
+        product_path,
     )
+    completed += 1
+    notify("done", picking_wave_path)
+
+    storage_path = data_dir / "Storage_Location.csv"
+    notify("start", storage_path)
+    storage_locations = tuple(
+        load_storage_locations(storage_path, coordinate_unit=coordinate_unit)
+    )
+    completed += 1
+    notify("done", storage_path)
+
+    support_path = data_dir / "Support_Points_Navigation.csv"
+    notify("start", support_path)
+    support_points = tuple(
+        load_support_points(support_path, coordinate_unit=coordinate_unit)
+    )
+    completed += 1
+    notify("done", support_path)
+
     return DatasetBundle(
-        storage_locations=tuple(
-            load_storage_locations(
-                data_dir / "Storage_Location.csv",
-                coordinate_unit=coordinate_unit,
-            )
-        ),
-        support_points=tuple(
-            load_support_points(
-                data_dir / "Support_Points_Navigation.csv",
-                coordinate_unit=coordinate_unit,
-            )
-        ),
+        storage_locations=storage_locations,
+        support_points=support_points,
         products=tuple(products),
         customer_orders=tuple(customer_orders),
         picking_lists=tuple(picking_lists),
