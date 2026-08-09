@@ -40,6 +40,13 @@ pip install -e .
 python -m entropy_thesis.simulation.phase1 --data-dir data/raw
 ```
 
+networkx 오류 발생하면 패키지 설치:
+(thesis-env) PS D:\workspace\entropy-thesis> pip install networkx 실행
+
+```bash
+pip install networkx
+```
+
 ## 필요한 패키지
 
 - pandas
