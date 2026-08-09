@@ -20,6 +20,7 @@ venv/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+.pytest_tmp/
 
 # Jupyter
 .ipynb_checkpoints/

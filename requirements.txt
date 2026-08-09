@@ -2,3 +2,6 @@
 # This editable install keeps the legacy `pip install -r` workflow portable.
 -e .
 
+networkx>=3.0
+simpy>=4.0
+pandas>=2.0

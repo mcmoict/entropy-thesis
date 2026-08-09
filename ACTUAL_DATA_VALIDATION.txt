@@ -1,0 +1,48 @@
+Phase 1 actual uploaded CSV validation
+=====================================
+
+Validated files:
+- Storage_Location.csv
+- Support_Points_Navigation.csv
+- Product.csv
+- Customer_Order.csv
+- Picking_Wave.csv
+
+Observed counts:
+- Storage locations: 2,292
+- Support points: 44
+- Products: 208
+- Customer order lines: 122,370
+- Picking rows/tasks: 215,192
+- Unique waves in Picking_Wave: 9,707
+- (wave, operator) picking lists: 9,796
+- Operators in Picking_Wave: 22
+
+Warehouse graph built from the actual files:
+- Navigation nodes: 510
+- Navigation edges: 534
+- Connected components: 1
+- Default I/O node: SUP:CC-01
+
+Picking-location resolution against Storage_Location.csv:
+- Resolved tasks: 191,583 (89.03%)
+- Unresolved tasks: 23,609 (10.97%)
+- Fully resolvable (wave, operator) lists: 7,402 / 9,796
+
+Most frequent unresolved locations:
+- RC-01: 22,979
+- RC-04: 361
+- RC-05: 100
+- C-102: 31
+- C-026: 27
+- RC-03: 19
+- ZN-COR: 15
+- K-26-20: 12
+- G-25-10: 12
+- K-25-20: 10
+
+Code unit tests: 6 passed.
+
+Note:
+Unresolved coordinates are intentionally NOT invented. Phase 1 smoke simulation uses
+fully-resolvable picking lists only; unknown locations are separately auditable.
