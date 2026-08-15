@@ -101,23 +101,30 @@
       "Z04": 1
     }
   },
+  "baseline": {
+    "method": "original_operator_assignment",
+    "workers": 8,
+    "description": "Picking_Wave.csv의 원본 operator 배정을 그대로 유지한 Phase 2 방식의 observed baseline"
+  },
   "definitions": {
     "zone_partition": "Phase 1 graph의 horizontal support-point aisle y 좌표를 정렬한 뒤 zone 수만큼 연속적이고 가능한 균등한 aisle 개수로 분할한다.",
     "list_zone_assignment": "각 fully-valid picking list를 분할하지 않고, pick task 수가 가장 많은 physical aisle zone에 귀속한다. 동률이면 pick units, 이후 zone 순서로 결정한다.",
     "allocation_workload": "zone에 귀속된 전체 picking list workload. tasks 선택 시 list 내 pick task 수, units 선택 시 quantity units 합을 사용한다.",
     "active_zone": "allocation_workload가 0보다 큰 zone",
     "minimum_per_active_zone": "workload가 있는 zone만 대상으로 적용하는 최소 작업자 수. workload가 0인 zone에는 작업자를 강제로 두지 않는다.",
-    "fair_comparison": "모든 방법은 동일한 selected picking lists, release time, 원래 pick 순서, warehouse graph, 이동속도, 피킹시간, congestion resource 정의를 사용한다. 주요 변경 변수는 zone별 worker count이다.",
+    "fair_comparison": "모든 방법은 동일한 selected picking lists, release time, 원래 pick 순서, warehouse graph, 이동속도, 피킹시간, congestion resource 정의를 사용한다. baseline은 원본 operator 배정을 유지하고, 나머지 방법의 주요 변경 변수는 zone별 worker count이다.",
+    "baseline": "Picking_Wave.csv에 기록된 원래 operator별 picking list 배정을 그대로 유지한 observed baseline. 작업자를 하나의 Phase 3 zone에 고정하지 않으므로 zone별 worker count는 정의하지 않는다.",
     "random": "활성 zone에 최소 인원을 둔 뒤 잔여 작업자를 seed 기반 균등 무작위 배치",
     "equal": "활성 zone에 작업자를 가능한 균등하게 배치",
     "volume_proportional": "활성 zone의 allocation workload 비중에 비례하여 작업자 배치",
     "demand_worker_l1_gap": "0.5 * sum(|worker_share - workload_share|). 0이면 작업자 비중과 workload 비중이 동일하다.",
     "worker_allocation_entropy_normalized": "zone별 작업자 수 분포의 normalized Shannon entropy. 전체 zone 수를 범주 수로 사용한다.",
     "congestion_conflict": "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 양의 대기가 발생한 resource contention event",
+    "congestion_delay_ratio": "congestion_wait_seconds / (movement_seconds + congestion_wait_seconds). Comparison 표에서는 Congestion(%)로 표시한다.",
     "mean_flow_time_seconds": "각 picking list의 release 시점부터 완료 시점까지 걸린 시간 finished_at_seconds - released_at_seconds의 평균",
     "makespan_seconds": "선택된 picking list 중 최초 release 시점부터 마지막 완료 시점까지의 전체 처리 시간"
   },
-  "phase_boundary": "Phase 3는 random/equal/volume_proportional baseline 비교까지만 수행한다. entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다.",
+  "phase_boundary": "Phase 3는 observed baseline과 random/equal/volume_proportional 비교까지만 수행한다. entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다.",
   "demand_entropy": {
     "warehouse_pick_nodes": 466,
     "demand_nodes_used": 242,

@@ -180,3 +180,49 @@ def test_tiny_phase3_method_executes_every_original_list():
     assert all(event.release_delay_seconds >= 0 for event in result.executions)
     assert all(event.assigned_worker.startswith("EQUAL:") for event in result.executions)
     assert [p.operator for p in lists] == ["ORIGINAL_A", "ORIGINAL_B", "ORIGINAL_A"]
+
+
+def test_observed_baseline_preserves_original_operator_assignment():
+    from datetime import date
+
+    from entropy_thesis.simulation.phase2 import calculate_demand_entropy
+    from entropy_thesis.simulation.phase3 import run_phase3_observed_baseline
+
+    warehouse = build_tiny_warehouse()
+    zones = build_aisle_zones(warehouse, number_of_zones=2)
+    lists = [
+        _list("W1", "ORIGINAL_A", ["A-01-11", "A-01-11"]),
+        _list("W2", "ORIGINAL_B", ["B-01-11"]),
+        _list("W3", "ORIGINAL_A", ["A-01-11", "B-01-11"]),
+    ]
+    assignments = classify_picking_lists_by_zone(warehouse, lists, zones)
+    demand_entropy, _ = calculate_demand_entropy(warehouse, lists)
+
+    result = run_phase3_observed_baseline(
+        warehouse,
+        lists,
+        zones,
+        assignments,
+        selected_date=date(2023, 1, 5),
+        demand_entropy=demand_entropy,
+        walking_speed_mps=1.0,
+        pick_seconds_per_unit=1.0,
+        edge_capacity=1,
+        pick_node_capacity=1,
+        sample_seconds=0.5,
+        return_to_io=True,
+    )
+
+    assert result.method == "baseline"
+    assert result.worker_counts == ()
+    assert result.summary.total_workers == 2
+    assert len(result.executions) == len(lists)
+    assert {event.assigned_worker for event in result.executions} == {
+        "ORIGINAL_A",
+        "ORIGINAL_B",
+    }
+    assert all(
+        event.assigned_worker == event.original_operator for event in result.executions
+    )
+    assert result.summary.mean_flow_time_seconds > 0.0
+    assert result.summary.makespan_seconds > 0.0

@@ -21,6 +21,7 @@ from .phase2 import (
     PickingListExecution,
     Phase2Summary,
     calculate_demand_entropy,
+    run_phase2_simulation,
     select_phase2_lists,
     summarize_phase2,
 )
@@ -84,7 +85,7 @@ class Phase3ListExecution:
 @dataclass(frozen=True)
 class Phase3RunSummary:
     method: str
-    seed: int
+    seed: int | None
     selected_date: str
     total_workers: int
     zones: int
@@ -125,7 +126,7 @@ class Phase3RunSummary:
 @dataclass(frozen=True)
 class Phase3MethodResult:
     method: str
-    seed: int
+    seed: int | None
     worker_counts: tuple[int, ...]
     workers: dict[str, Worker]
     traffic: TrafficController
@@ -134,6 +135,24 @@ class Phase3MethodResult:
     occupancy: tuple[CellOccupancyMetrics, ...]
     phase2_summary: Phase2Summary
     summary: Phase3RunSummary
+
+
+def _execution_time_metrics(
+    executions: Iterable[PickingListExecution | Phase3ListExecution],
+) -> tuple[float, float]:
+    execution_list = list(executions)
+    if not execution_list:
+        return 0.0, 0.0
+
+    flow_times = [
+        max(0.0, event.finished_at_seconds - event.released_at_seconds)
+        for event in execution_list
+    ]
+    makespan_seconds = (
+        max(event.finished_at_seconds for event in execution_list)
+        - min(event.released_at_seconds for event in execution_list)
+    )
+    return mean(flow_times), makespan_seconds
 
 
 def build_aisle_zones(
@@ -440,6 +459,164 @@ def _release_zone_jobs(
         yield queue.put(sentinel)
 
 
+def run_phase3_observed_baseline(
+    warehouse: WarehouseGraph,
+    picking_lists: list[PickingList] | tuple[PickingList, ...],
+    zones: tuple[AisleZone, ...],
+    assignments: tuple[PickingListZoneAssignment, ...],
+    *,
+    selected_date: date,
+    demand_entropy: DemandEntropyMetrics,
+    walking_speed_mps: float = 1.2,
+    pick_seconds_per_unit: float = 3.0,
+    edge_capacity: int = 1,
+    pick_node_capacity: int = 1,
+    sample_seconds: float = 5.0,
+    return_to_io: bool = True,
+    volume_basis: Literal["tasks", "units"] = "tasks",
+    progress_callback: Callable[[int, int, PickingList], None] | None = None,
+) -> Phase3MethodResult:
+    """Run the observed-data operator assignment as the Phase 3 baseline.
+
+    Unlike the synthetic allocation methods, the baseline keeps the original
+    ``Picking_Wave.csv`` operator assignment exactly as observed.  Operators
+    are therefore not forced into a single Phase 3 dispatch zone, so a
+    zone-level worker-count vector is intentionally not defined for this row.
+    """
+
+    if len(picking_lists) != len(assignments):
+        raise ValueError("picking_lists와 assignments 길이가 다릅니다.")
+
+    (
+        workers,
+        traffic,
+        phase2_executions,
+        entropy_samples,
+        occupancy,
+        _origin,
+        simulation_elapsed_seconds,
+    ) = run_phase2_simulation(
+        warehouse,
+        picking_lists,
+        walking_speed_mps=walking_speed_mps,
+        pick_seconds_per_unit=pick_seconds_per_unit,
+        edge_capacity=edge_capacity,
+        pick_node_capacity=pick_node_capacity,
+        sample_seconds=sample_seconds,
+        return_to_io=return_to_io,
+        progress_callback=progress_callback,
+    )
+
+    phase2_summary = summarize_phase2(
+        selected_date=selected_date,
+        picking_lists=list(picking_lists),
+        workers=workers,
+        wait_events=traffic.wait_events,
+        executions=phase2_executions,
+        entropy_samples=entropy_samples,
+        occupancy=occupancy,
+        demand_entropy=demand_entropy,
+        simulation_elapsed_seconds=simulation_elapsed_seconds,
+    )
+
+    list_lookup: dict[tuple[str, str], tuple[PickingList, PickingListZoneAssignment]] = {}
+    for picking_list, assignment in zip(picking_lists, assignments, strict=True):
+        key = (picking_list.wave_number, picking_list.operator)
+        if key in list_lookup:
+            raise ValueError(
+                "Baseline 변환 중 중복 wave/operator 조합이 발견되었습니다: "
+                f"wave={picking_list.wave_number}, operator={picking_list.operator}"
+            )
+        list_lookup[key] = (picking_list, assignment)
+
+    executions: list[Phase3ListExecution] = []
+    for event in phase2_executions:
+        picking_list, assignment = list_lookup[(event.wave_number, event.operator)]
+        executions.append(
+            Phase3ListExecution(
+                method="baseline",
+                wave_number=event.wave_number,
+                original_operator=event.operator,
+                assigned_zone=assignment.zone_id,
+                assigned_worker=event.operator,
+                released_at_seconds=event.released_at_seconds,
+                started_at_seconds=event.started_at_seconds,
+                finished_at_seconds=event.finished_at_seconds,
+                release_delay_seconds=event.release_delay_seconds,
+                pick_tasks=event.pick_tasks,
+                pick_units=sum(
+                    float(task.quantity_units) for task in picking_list.picks
+                ),
+                physical_zone_count=assignment.physical_zone_count,
+            )
+        )
+    executions.sort(
+        key=lambda event: (
+            event.started_at_seconds,
+            event.wave_number,
+            event.original_operator,
+        )
+    )
+
+    mean_flow_time_seconds, makespan_seconds = _execution_time_metrics(
+        phase2_executions
+    )
+    summary = Phase3RunSummary(
+        method="baseline",
+        seed=None,
+        selected_date=selected_date.isoformat(),
+        total_workers=len(workers),
+        zones=len(zones),
+        active_zones=sum(
+            value > 0
+            for value in zone_workload(zones, assignments, basis=volume_basis)
+        ),
+        worker_allocation_entropy_normalized=float("nan"),
+        demand_worker_l1_gap=float("nan"),
+        picking_lists=phase2_summary.picking_lists,
+        pick_tasks=phase2_summary.pick_tasks,
+        picked_units=phase2_summary.picked_units,
+        total_distance_m=phase2_summary.total_distance_m,
+        movement_events=phase2_summary.movement_events,
+        movement_seconds=phase2_summary.movement_seconds,
+        congestion_conflicts=phase2_summary.congestion_conflicts,
+        edge_conflicts=phase2_summary.edge_conflicts,
+        pick_node_conflicts=phase2_summary.pick_node_conflicts,
+        congestion_wait_seconds=phase2_summary.congestion_wait_seconds,
+        mean_conflict_wait_seconds=phase2_summary.mean_conflict_wait_seconds,
+        p95_conflict_wait_seconds=phase2_summary.p95_conflict_wait_seconds,
+        max_conflict_wait_seconds=phase2_summary.max_conflict_wait_seconds,
+        congestion_delay_ratio=phase2_summary.congestion_delay_ratio,
+        mean_release_delay_seconds=phase2_summary.mean_release_delay_seconds,
+        max_release_delay_seconds=phase2_summary.max_release_delay_seconds,
+        mean_flow_time_seconds=mean_flow_time_seconds,
+        makespan_seconds=makespan_seconds,
+        entropy_samples=phase2_summary.entropy_samples,
+        mean_spatial_entropy_normalized=phase2_summary.mean_spatial_entropy_normalized,
+        mean_spatial_entropy_multiworker=phase2_summary.mean_spatial_entropy_multiworker,
+        min_spatial_entropy_normalized=phase2_summary.min_spatial_entropy_normalized,
+        max_spatial_entropy_normalized=phase2_summary.max_spatial_entropy_normalized,
+        mean_max_concentration=phase2_summary.mean_max_concentration,
+        shared_worker_ratio=phase2_summary.shared_worker_ratio,
+        occupied_spatial_cells=phase2_summary.occupied_spatial_cells,
+        congested_cell_seconds=phase2_summary.congested_cell_seconds,
+        max_cell_occupancy=phase2_summary.max_cell_occupancy,
+        simulation_elapsed_seconds=phase2_summary.simulation_elapsed_seconds,
+    )
+    return Phase3MethodResult(
+        method="baseline",
+        seed=None,
+        worker_counts=tuple(),
+        workers=workers,
+        traffic=traffic,
+        executions=tuple(executions),
+        entropy_samples=tuple(entropy_samples),
+        occupancy=tuple(occupancy),
+        phase2_summary=phase2_summary,
+        summary=summary,
+    )
+
+
 def run_phase3_method(
     warehouse: WarehouseGraph,
     picking_lists: list[PickingList] | tuple[PickingList, ...],
@@ -598,16 +775,7 @@ def run_phase3_method(
         for worker_share, demand_share in zip(worker_shares, demand_shares, strict=True)
     )
 
-    flow_times = [
-        max(0.0, event.finished_at_seconds - event.released_at_seconds)
-        for event in executions
-    ]
-    makespan_seconds = (
-        max(event.finished_at_seconds for event in executions)
-        - min(event.released_at_seconds for event in executions)
-        if executions
-        else 0.0
-    )
+    mean_flow_time_seconds, makespan_seconds = _execution_time_metrics(executions)
 
     summary = Phase3RunSummary(
         method=method,
@@ -634,7 +802,7 @@ def run_phase3_method(
         congestion_delay_ratio=phase2_summary.congestion_delay_ratio,
         mean_release_delay_seconds=phase2_summary.mean_release_delay_seconds,
         max_release_delay_seconds=phase2_summary.max_release_delay_seconds,
-        mean_flow_time_seconds=mean(flow_times) if flow_times else 0.0,
+        mean_flow_time_seconds=mean_flow_time_seconds,
         makespan_seconds=makespan_seconds,
         entropy_samples=phase2_summary.entropy_samples,
         mean_spatial_entropy_normalized=phase2_summary.mean_spatial_entropy_normalized,
@@ -773,6 +941,7 @@ def write_phase3_results(
     *,
     zones: tuple[AisleZone, ...],
     assignments: tuple[PickingListZoneAssignment, ...],
+    baseline: Phase3MethodResult,
     results: tuple[Phase3MethodResult, ...],
     warehouse: WarehouseGraph,
     picking_lists: list[PickingList],
@@ -783,7 +952,9 @@ def write_phase3_results(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    pd.DataFrame([asdict(result.summary) for result in results]).to_csv(
+    comparison_results = (baseline, *results)
+
+    pd.DataFrame([asdict(result.summary) for result in comparison_results]).to_csv(
         output_dir / "phase3_summary.csv", index=False
     )
     pd.DataFrame(
@@ -797,21 +968,25 @@ def write_phase3_results(
         )
     ).to_csv(output_dir / "phase3_zones.csv", index=False)
 
-    worker_records = [record for result in results for record in _worker_records(result)]
+    worker_records = [
+        record for result in comparison_results for record in _worker_records(result)
+    ]
     pd.DataFrame(worker_records).to_csv(output_dir / "phase3_workers.csv", index=False)
 
-    list_records = [asdict(event) for result in results for event in result.executions]
+    list_records = [
+        asdict(event) for result in comparison_results for event in result.executions
+    ]
     pd.DataFrame(list_records).to_csv(output_dir / "phase3_lists.csv", index=False)
 
     congestion_records = [
-        record for result in results for record in _congestion_records(result)
+        record for result in comparison_results for record in _congestion_records(result)
     ]
     pd.DataFrame(congestion_records).to_csv(
         output_dir / "phase3_congestion.csv", index=False
     )
 
     entropy_records: list[dict[str, object]] = []
-    for result in results:
+    for result in comparison_results:
         for sample in result.entropy_samples:
             record = asdict(sample)
             record["method"] = result.method
@@ -820,7 +995,7 @@ def write_phase3_results(
     pd.DataFrame(entropy_records).to_csv(output_dir / "phase3_entropy.csv", index=False)
 
     occupancy_records: list[dict[str, object]] = []
-    for result in results:
+    for result in comparison_results:
         for cell in result.occupancy:
             record = asdict(cell)
             record["method"] = result.method
@@ -865,6 +1040,7 @@ def build_and_run_phase3(
     tuple[AisleZone, ...],
     tuple[PickingListZoneAssignment, ...],
     DemandEntropyMetrics,
+    Phase3MethodResult,
     tuple[Phase3MethodResult, ...],
     pd.Timestamp,
 ]:
@@ -906,6 +1082,47 @@ def build_and_run_phase3(
         raise ValueError("Phase 3 method가 하나 이상 필요합니다.")
 
     origin = min(p.created_at for p in selected_lists if p.created_at is not None)
+
+    baseline_report_every = max(1, len(selected_lists) // 10)
+
+    def baseline_progress(
+        completed: int,
+        total: int,
+        picking_list: PickingList,
+    ) -> None:
+        if progress is None:
+            return
+        if completed != 1 and completed != total and completed % baseline_report_every != 0:
+            return
+        progress.report(
+            0.20 + 0.10 * (completed / total),
+            f"Simulating baseline: {completed:,}/{total:,} lists",
+            current=f"operator={picking_list.operator}",
+        )
+
+    if progress is not None:
+        progress.report(
+            0.20,
+            "Starting observed baseline simulation",
+            current=f"operators={inferred_workers}",
+        )
+    baseline = run_phase3_observed_baseline(
+        warehouse,
+        selected_lists,
+        zones,
+        assignments,
+        selected_date=selected_date,
+        demand_entropy=demand_entropy,
+        walking_speed_mps=walking_speed_mps,
+        pick_seconds_per_unit=pick_seconds_per_unit,
+        edge_capacity=edge_capacity,
+        pick_node_capacity=pick_node_capacity,
+        sample_seconds=sample_seconds,
+        return_to_io=return_to_io,
+        volume_basis=volume_basis,
+        progress_callback=baseline_progress,
+    )
+
     results: list[Phase3MethodResult] = []
     for method_index, method in enumerate(canonical_methods):
         counts = allocate_phase3_workers(
@@ -915,8 +1132,8 @@ def build_and_run_phase3(
             seed=seed,
             minimum_per_active_zone=minimum_per_active_zone,
         )
-        base = 0.25 + 0.65 * (method_index / len(canonical_methods))
-        span = 0.65 / len(canonical_methods)
+        base = 0.30 + 0.60 * (method_index / len(canonical_methods))
+        span = 0.60 / len(canonical_methods)
         report_every = max(1, len(selected_lists) // 10)
 
         def simulation_progress(
@@ -978,6 +1195,7 @@ def build_and_run_phase3(
         zones,
         assignments,
         demand_entropy,
+        baseline,
         tuple(results),
         origin,
     )
@@ -1035,6 +1253,7 @@ def main() -> None:
         zones,
         assignments,
         demand_entropy,
+        baseline,
         results,
         origin,
     ) = build_and_run_phase3(
@@ -1105,6 +1324,13 @@ def main() -> None:
             )
             for result in results
         },
+        "baseline": {
+            "method": "original_operator_assignment",
+            "workers": baseline.summary.total_workers,
+            "description": (
+                "Picking_Wave.csv의 원본 operator 배정을 그대로 유지한 Phase 2 방식의 observed baseline"
+            ),
+        },
         "definitions": {
             "zone_partition": (
                 "Phase 1 graph의 horizontal support-point aisle y 좌표를 정렬한 뒤 "
@@ -1126,7 +1352,11 @@ def main() -> None:
             "fair_comparison": (
                 "모든 방법은 동일한 selected picking lists, release time, 원래 pick 순서, "
                 "warehouse graph, 이동속도, 피킹시간, congestion resource 정의를 사용한다. "
-                "주요 변경 변수는 zone별 worker count이다."
+                "baseline은 원본 operator 배정을 유지하고, 나머지 방법의 주요 변경 변수는 zone별 worker count이다."
+            ),
+            "baseline": (
+                "Picking_Wave.csv에 기록된 원래 operator별 picking list 배정을 그대로 유지한 observed baseline. "
+                "작업자를 하나의 Phase 3 zone에 고정하지 않으므로 zone별 worker count는 정의하지 않는다."
             ),
             "random": "활성 zone에 최소 인원을 둔 뒤 잔여 작업자를 seed 기반 균등 무작위 배치",
             "equal": "활성 zone에 작업자를 가능한 균등하게 배치",
@@ -1141,6 +1371,10 @@ def main() -> None:
                 "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 "
                 "양의 대기가 발생한 resource contention event"
             ),
+            "congestion_delay_ratio": (
+                "congestion_wait_seconds / (movement_seconds + congestion_wait_seconds). "
+                "Comparison 표에서는 Congestion(%)로 표시한다."
+            ),
             "mean_flow_time_seconds": (
                 "각 picking list의 release 시점부터 완료 시점까지 걸린 시간 "
                 "finished_at_seconds - released_at_seconds의 평균"
@@ -1150,7 +1384,7 @@ def main() -> None:
             ),
         },
         "phase_boundary": (
-            "Phase 3는 random/equal/volume_proportional baseline 비교까지만 수행한다. "
+            "Phase 3는 observed baseline과 random/equal/volume_proportional 비교까지만 수행한다. "
             "entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다."
         ),
         "demand_entropy": asdict(demand_entropy),
@@ -1161,6 +1395,7 @@ def main() -> None:
         args.output_dir,
         zones=zones,
         assignments=assignments,
+        baseline=baseline,
         results=results,
         warehouse=warehouse,
         picking_lists=selected_lists,
@@ -1190,16 +1425,17 @@ def main() -> None:
     print()
     print("=== Comparison ===")
     print(
-        "Method               Distance(m)   Conflicts   Wait(s)   Mean release delay(s)   "
+        "Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   "
         "Mean flow time(s)   Makespan(s)   Mean spatial H"
     )
-    for result in results:
+    for result in (baseline, *results):
         summary = result.summary
         print(
             f"{summary.method:<20} "
             f"{summary.total_distance_m:>11,.2f}   "
             f"{summary.congestion_conflicts:>9,}   "
             f"{summary.congestion_wait_seconds:>7,.2f}   "
+            f"{summary.congestion_delay_ratio * 100:>13.2f}   "
             f"{summary.mean_release_delay_seconds:>21,.2f}   "
             f"{summary.mean_flow_time_seconds:>17,.2f}   "
             f"{summary.makespan_seconds:>11,.2f}   "

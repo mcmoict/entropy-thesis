@@ -1,10 +1,11 @@
 # Phase 3 - 실제 데이터 기반 기존 작업자 배치 방식 비교
 
-Phase 2에서 구축한 실제 창고 graph, Picking_Wave 피킹 순서, release time, 이동/혼잡/공간 엔트로피 계산 계층을 그대로 사용하여 **기존 작업자 배치 방식 3개**를 비교한다.
+Phase 2에서 구축한 실제 창고 graph, Picking_Wave 피킹 순서, release time, 이동/혼잡/공간 엔트로피 계산 계층을 그대로 사용하여 **실제 운영 Baseline과 기존 작업자 배치 방식 3개**를 비교한다.
 
-1. **Random Allocation**
-2. **Equal Allocation**
-3. **Volume Proportional Allocation**
+1. **Observed Baseline**: `Picking_Wave.csv`의 원본 operator 배정 유지
+2. **Random Allocation**
+3. **Equal Allocation**
+4. **Volume Proportional Allocation**
 
 `Entropy-based Allocation`은 Phase 3에 넣지 않는다. Phase 3에서 baseline 비교 구조를 먼저 고정하고, 같은 구조에 엔트로피 목적함수를 추가하는 작업은 Phase 4에서 수행한다.
 
@@ -83,6 +84,13 @@ units = zone에 귀속된 picking list의 quantity units 합
 - workload가 있는데 작업자가 0명이 되어 시뮬레이션에서 처리할 수 없는 문제
 
 ## 비교 전략
+
+### 0. Observed Baseline
+
+`Picking_Wave.csv`에 기록된 원래 operator별 picking list 배정을 그대로 유지한다.
+이는 Phase 2의 실제 operator schedule과 동일한 방식이며, Random / Equal / Volume Proportional의 비교 기준선으로 사용한다.
+
+Baseline 작업자는 하나의 Phase 3 dispatch zone에 고정되지 않고 원래 배정된 picking list를 처리하면서 여러 zone을 이동할 수 있다. 따라서 `Zone Workload / Worker Allocation` 표에는 Baseline의 zone별 worker count를 표시하지 않고, 최종 `Comparison` 표에 성능 지표만 표시한다.
 
 ### 1. Random Allocation
 
@@ -248,7 +256,15 @@ phase3_metadata.json
 
 ### phase3_congestion.csv / phase3_entropy.csv / phase3_occupancy.csv
 
-Phase 2와 같은 정의를 전략별로 기록한다. 따라서 동일한 congestion / spatial entropy 정의로 방법 간 비교가 가능하다.
+Phase 2와 같은 정의를 Baseline 및 전략별로 기록한다. 따라서 동일한 congestion / spatial entropy 정의로 방법 간 비교가 가능하다.
+
+`Comparison`의 `Congestion(%)`은 Phase 2에서 정의한 congestion delay ratio를 백분율로 표시한 값이다.
+
+```text
+Congestion(%)
+= 100 × Total Congestion Wait Time
+        / (Total Movement Time + Total Congestion Wait Time)
+```
 
 ## 추가 지표
 
