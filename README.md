@@ -147,7 +147,7 @@ entropy-thesis --config configs/overload.yaml
 엔트로피 민감도 분석은 같은 시나리오에서 `entropy_weight`만 바꿔 별도 출력 디렉터리로
 실행합니다. 설정과 seed가 같으면 결과가 동일합니다.
 
-## 실제 데이터 Phase 1 / Phase 2
+## 실제 데이터 Phase 1 / Phase 2 / Phase 3
 
 실제 CSV 기반 창고 graph 검증은 다음 명령으로 실행합니다.
 
@@ -161,7 +161,13 @@ Phase 2의 실제 picking schedule 기반 이동거리·혼잡·공간 엔트로
 python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
 ```
 
-세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`를 참고합니다.
+Phase 3의 실제 데이터 기반 Random / Equal / Volume Proportional 작업자 배치 비교는 다음과 같습니다.
+
+```bash
+python -m entropy_thesis.simulation.phase3 --data-dir data/raw --date 2023-01-05
+```
+
+세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`를 참고합니다.
 
 ## 모델 범위와 한계
 
@@ -171,6 +177,11 @@ python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
 생산성 저하는 아직 모델링하지 않습니다. 따라서 현재 결과를 실제 통로 충돌이나 안전상
 혼잡의 직접 추정치로 해석해서는 안 됩니다. 해당 결론이 필요하면 aisle resource,
 이동 네트워크와 밀도별 서비스율 저하를 후속 모델에 추가해야 합니다.
+
+(2026-08-15 추가)
+프로젝트에는 초기의 단순 구역별 `M/M/c` 기준 모델과 Phase 1~3의 실제 데이터 모델이 함께 존재합니다. 실제 데이터 모델은 Storage/Support 좌표로 만든 이동 graph, edge/pick-node capacity, 이동거리, resource contention 대기 및 작업자 공간 엔트로피를 계산합니다.
+
+다만 Phase 2~3의 `congestion conflict`는 **실제 사람끼리 물리적으로 충돌한 횟수**가 아니라 capacity-limited edge 또는 pick node에 즉시 진입하지 못해 발생한 simulated waiting event입니다. 또한 작업자 간 회피행동, 통로 폭에 따른 연속 밀도 효과, 보행속도 저하, 안전거리, order consolidation 등은 아직 모델링하지 않습니다. 따라서 결과는 배치 전략 간 상대 비교용으로 해석하고, 실제 안전 충돌 건수의 직접 추정치로 사용하지 않습니다.
 
 ## 테스트
 

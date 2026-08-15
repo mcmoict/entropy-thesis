@@ -46,3 +46,24 @@ Code unit tests: 6 passed.
 Note:
 Unresolved coordinates are intentionally NOT invented. Phase 1 smoke simulation uses
 fully-resolvable picking lists only; unknown locations are separately auditable.
+
+Phase 3 static allocation validation (2023-01-05)
+==================================================
+Fully-valid selected lists: 85
+Observed operators/effective default workers: 8
+Pick tasks: 1,996
+Default physical aisle zones: 4 (17 horizontal aisle levels -> 5/4/4/4)
+
+Dominant-list workload by zone (task basis):
+- Z01: 0 tasks
+- Z02: 120 tasks
+- Z03: 1,578 tasks
+- Z04: 298 tasks
+
+Default worker allocation (minimum 1 per active zone):
+- Random, seed=42: 0 / 3 / 2 / 3
+- Equal:           0 / 3 / 3 / 2
+- Volume:          0 / 1 / 6 / 1
+
+Phase 3 targeted allocation/integration tests: 6 passed.
+Full Phase 3 DES execution should be validated in the project environment with SimPy installed.
