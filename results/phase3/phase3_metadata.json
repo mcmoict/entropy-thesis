@@ -113,7 +113,9 @@
     "volume_proportional": "활성 zone의 allocation workload 비중에 비례하여 작업자 배치",
     "demand_worker_l1_gap": "0.5 * sum(|worker_share - workload_share|). 0이면 작업자 비중과 workload 비중이 동일하다.",
     "worker_allocation_entropy_normalized": "zone별 작업자 수 분포의 normalized Shannon entropy. 전체 zone 수를 범주 수로 사용한다.",
-    "congestion_conflict": "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 양의 대기가 발생한 resource contention event"
+    "congestion_conflict": "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 양의 대기가 발생한 resource contention event",
+    "mean_flow_time_seconds": "각 picking list의 release 시점부터 완료 시점까지 걸린 시간 finished_at_seconds - released_at_seconds의 평균",
+    "makespan_seconds": "선택된 picking list 중 최초 release 시점부터 마지막 완료 시점까지의 전체 처리 시간"
   },
   "phase_boundary": "Phase 3는 random/equal/volume_proportional baseline 비교까지만 수행한다. entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다.",
   "demand_entropy": {

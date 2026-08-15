@@ -107,6 +107,8 @@ class Phase3RunSummary:
     congestion_delay_ratio: float
     mean_release_delay_seconds: float
     max_release_delay_seconds: float
+    mean_flow_time_seconds: float
+    makespan_seconds: float
     entropy_samples: int
     mean_spatial_entropy_normalized: float
     mean_spatial_entropy_multiworker: float
@@ -596,6 +598,17 @@ def run_phase3_method(
         for worker_share, demand_share in zip(worker_shares, demand_shares, strict=True)
     )
 
+    flow_times = [
+        max(0.0, event.finished_at_seconds - event.released_at_seconds)
+        for event in executions
+    ]
+    makespan_seconds = (
+        max(event.finished_at_seconds for event in executions)
+        - min(event.released_at_seconds for event in executions)
+        if executions
+        else 0.0
+    )
+
     summary = Phase3RunSummary(
         method=method,
         seed=seed,
@@ -621,6 +634,8 @@ def run_phase3_method(
         congestion_delay_ratio=phase2_summary.congestion_delay_ratio,
         mean_release_delay_seconds=phase2_summary.mean_release_delay_seconds,
         max_release_delay_seconds=phase2_summary.max_release_delay_seconds,
+        mean_flow_time_seconds=mean(flow_times) if flow_times else 0.0,
+        makespan_seconds=makespan_seconds,
         entropy_samples=phase2_summary.entropy_samples,
         mean_spatial_entropy_normalized=phase2_summary.mean_spatial_entropy_normalized,
         mean_spatial_entropy_multiworker=phase2_summary.mean_spatial_entropy_multiworker,
@@ -1126,6 +1141,13 @@ def main() -> None:
                 "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 "
                 "양의 대기가 발생한 resource contention event"
             ),
+            "mean_flow_time_seconds": (
+                "각 picking list의 release 시점부터 완료 시점까지 걸린 시간 "
+                "finished_at_seconds - released_at_seconds의 평균"
+            ),
+            "makespan_seconds": (
+                "선택된 picking list 중 최초 release 시점부터 마지막 완료 시점까지의 전체 처리 시간"
+            ),
         },
         "phase_boundary": (
             "Phase 3는 random/equal/volume_proportional baseline 비교까지만 수행한다. "
@@ -1168,7 +1190,8 @@ def main() -> None:
     print()
     print("=== Comparison ===")
     print(
-        "Method               Distance(m)   Conflicts   Wait(s)   Mean release delay(s)   Mean spatial H"
+        "Method               Distance(m)   Conflicts   Wait(s)   Mean release delay(s)   "
+        "Mean flow time(s)   Makespan(s)   Mean spatial H"
     )
     for result in results:
         summary = result.summary
@@ -1178,6 +1201,8 @@ def main() -> None:
             f"{summary.congestion_conflicts:>9,}   "
             f"{summary.congestion_wait_seconds:>7,.2f}   "
             f"{summary.mean_release_delay_seconds:>21,.2f}   "
+            f"{summary.mean_flow_time_seconds:>17,.2f}   "
+            f"{summary.makespan_seconds:>11,.2f}   "
             f"{summary.mean_spatial_entropy_normalized:>14.4f}"
         )
     print()

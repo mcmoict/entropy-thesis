@@ -165,6 +165,18 @@ def test_tiny_phase3_method_executes_every_original_list():
     assert result.summary.picking_lists == len(lists)
     assert result.summary.pick_tasks == sum(len(p.picks) for p in lists)
     assert result.summary.picked_units == pytest.approx(5.0)
+    expected_flow_times = [
+        event.finished_at_seconds - event.released_at_seconds
+        for event in result.executions
+    ]
+    expected_makespan = (
+        max(event.finished_at_seconds for event in result.executions)
+        - min(event.released_at_seconds for event in result.executions)
+    )
+    assert result.summary.mean_flow_time_seconds == pytest.approx(
+        sum(expected_flow_times) / len(expected_flow_times)
+    )
+    assert result.summary.makespan_seconds == pytest.approx(expected_makespan)
     assert all(event.release_delay_seconds >= 0 for event in result.executions)
     assert all(event.assigned_worker.startswith("EQUAL:") for event in result.executions)
     assert [p.operator for p in lists] == ["ORIGINAL_A", "ORIGINAL_B", "ORIGINAL_A"]
