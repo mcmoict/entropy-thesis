@@ -124,7 +124,7 @@ class Phase3RunSummary:
 
 @dataclass(frozen=True)
 class Phase3MethodResult:
-    method: Phase3Method
+    method: str
     seed: int
     worker_counts: tuple[int, ...]
     workers: dict[str, Worker]
@@ -446,7 +446,7 @@ def run_phase3_method(
     zones: tuple[AisleZone, ...],
     assignments: tuple[PickingListZoneAssignment, ...],
     *,
-    method: Phase3Method,
+    method: str,
     worker_counts: tuple[int, ...],
     selected_date: date,
     demand_entropy: DemandEntropyMetrics,

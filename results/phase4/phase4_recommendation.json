@@ -1,0 +1,15 @@
+{
+  "selection_metric": "mean_flow_time_seconds",
+  "direction": "minimize",
+  "entropy_weight": 0.0,
+  "allocation_id": "A001",
+  "worker_counts": [
+    0,
+    1,
+    6,
+    1
+  ],
+  "metric_value": 374.8441176470235,
+  "allocation_entropy_normalized": 0.5306390622295665,
+  "demand_worker_l1_gap": 0.06487975951903806
+}

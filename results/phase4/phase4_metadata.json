@@ -1,0 +1,121 @@
+{
+  "phase": 4,
+  "selected_date": "2023-01-05",
+  "origin_timestamp": "2023-01-05T07:42:00",
+  "input": {
+    "storage_locations": 2292,
+    "support_points": 44,
+    "picking_lists_total": 9796,
+    "fully_resolvable_lists_total": 7402,
+    "selected_lists": 85,
+    "observed_operators": 8
+  },
+  "parameters": {
+    "zones": 4,
+    "workers": null,
+    "effective_workers": 8,
+    "volume_basis": "tasks",
+    "minimum_per_active_zone": 1,
+    "entropy_weights": [
+      0.0,
+      0.25,
+      0.5,
+      1.0,
+      2.0,
+      4.0,
+      8.0
+    ],
+    "selection_metric": "mean_flow_time_seconds",
+    "seed": 42,
+    "walking_speed_mps": 1.2,
+    "pick_seconds_per_unit": 3.0,
+    "edge_capacity": 1,
+    "pick_node_capacity": 1,
+    "sample_seconds": 5.0,
+    "return_to_io": true,
+    "max_lists": null
+  },
+  "candidate_count": 7,
+  "unique_simulation_count": 4,
+  "zones": [
+    {
+      "zone_id": "Z01",
+      "aisle_y_values_m": [
+        -0.29,
+        0.61,
+        1.51,
+        2.41,
+        3.31
+      ],
+      "y_min_m": -0.29,
+      "y_max_m": 3.31,
+      "allocation_workload": 0.0
+    },
+    {
+      "zone_id": "Z02",
+      "aisle_y_values_m": [
+        4.21,
+        5.11,
+        6.31,
+        7.51
+      ],
+      "y_min_m": 4.21,
+      "y_max_m": 7.51,
+      "allocation_workload": 120.0
+    },
+    {
+      "zone_id": "Z03",
+      "aisle_y_values_m": [
+        8.41,
+        9.31,
+        10.21,
+        11.11
+      ],
+      "y_min_m": 8.41,
+      "y_max_m": 11.11,
+      "allocation_workload": 1578.0
+    },
+    {
+      "zone_id": "Z04",
+      "aisle_y_values_m": [
+        12.01,
+        12.91,
+        13.81,
+        14.71
+      ],
+      "y_min_m": 12.01,
+      "y_max_m": 14.71,
+      "allocation_workload": 298.0
+    }
+  ],
+  "definitions": {
+    "entropy_objective": "min KL(p || d) - lambda * H(p)",
+    "closed_form": "p_i proportional to d_i ** (1 / (1 + lambda))",
+    "lambda_zero": "lambda=0은 Phase 3 Volume Proportional Allocation과 동일한 연속 비율을 만들며 같은 minimum/water-filling/largest-remainder 규칙으로 정수화한다.",
+    "lambda_effect": "lambda가 커질수록 양의 수요가 있는 zone의 worker share가 균등 분포 쪽으로 이동한다.",
+    "duplicate_allocation_cache": "서로 다른 lambda가 동일한 정수 worker allocation을 만들면 DES 입력이 동일하므로 한 번만 시뮬레이션하고 결과를 해당 lambda 후보들이 공유한다.",
+    "selection_rule": "--selection-metric으로 지정한 단일 KPI를 기준으로 lambda를 선택한다. 비용/시간 지표는 최소화하고 mean_spatial_entropy_normalized는 최대화한다. 정확한 동률이면 더 작은 lambda를 선택한다.",
+    "default_selection_metric": "mean_flow_time_seconds: 각 picking list의 release부터 completion까지 flow time 평균",
+    "phase4_role": "한 calibration date에서 entropy lambda를 탐색한다. 여러 날짜에 대한 일반화 검증은 Phase 5에서 수행한다."
+  },
+  "selected": {
+    "entropy_weight": 0.0,
+    "allocation_id": "A001",
+    "worker_counts": [
+      0,
+      1,
+      6,
+      1
+    ],
+    "selection_metric": "mean_flow_time_seconds",
+    "selection_metric_value": 374.8441176470235
+  },
+  "demand_entropy": {
+    "warehouse_pick_nodes": 466,
+    "demand_nodes_used": 242,
+    "task_entropy_bits": 7.332787711580227,
+    "task_entropy_normalized": 0.8272375593107787,
+    "unit_entropy_bits": 7.332787711580227,
+    "unit_entropy_normalized": 0.8272375593107787
+  }
+}
