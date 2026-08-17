@@ -175,10 +175,10 @@ python -m entropy_thesis.simulation.phase4 --data-dir data/raw
 
 기본 λ 후보는 `0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8`입니다. 기본 분할은 날짜 단위 chronological 70% Calibration / 30% Holdout이며, 동일 날짜에서 같은 정수 작업자 배치를 만드는 λ는 DES를 한 번만 실행합니다. λ*는 Calibration 날짜별 `mean_flow_time_seconds` 평균을 기준으로 선택하고, λ=0 대비 paired Wilcoxon 통계도 함께 저장합니다.
 
-Phase 5의 다중 날짜 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택한 λ를 고정하고 Holdout 운영일의 Baseline / Random / Equal / Volume Proportional / Entropy-based 결과를 paired 비교하는 구조입니다. (현재 Phase 5 CLI의 Holdout 자동 연결은 다음 단계에서 수정 예정입니다.)
+Phase 5의 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택한 λ*와 Holdout 날짜를 `results/phase4/phase4_recommendation.json`에서 그대로 읽어 Baseline / Random / Equal / Volume Proportional / Entropy-based를 paired 비교합니다. Phase 5에서는 λ 재보정이나 Holdout 재분할을 하지 않습니다.
 
 ```bash
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --validation-days 12
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 ```
 
 세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`, `README_PHASE5.md`를 참고합니다.

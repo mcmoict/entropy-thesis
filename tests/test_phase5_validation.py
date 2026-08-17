@@ -8,6 +8,7 @@ import pytest
 from entropy_thesis.simulation.phase5 import (
     _evenly_spaced_dates,
     aggregate_method_records,
+    load_phase4_holdout_spec,
     paired_comparison_records,
     select_validation_dates,
 )
@@ -98,3 +99,39 @@ def test_paired_comparison_counts_entropy_wins_for_minimize_metric() -> None:
     assert item["ties"] == 0
     assert item["losses"] == 0
     assert item["mean_improvement_pct"] == pytest.approx(20.0)
+
+
+def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:
+    path = tmp_path / "phase4_recommendation.json"
+    path.write_text(
+        """{
+  "phase": "4E",
+  "selection_metric": "mean_flow_time_seconds",
+  "entropy_weight": 0.05,
+  "calibration_dates": ["2023-01-05", "2023-01-06"],
+  "holdout_dates": ["2023-07-19", "2023-07-24"]
+}
+""",
+        encoding="utf-8",
+    )
+    spec = load_phase4_holdout_spec(path)
+    assert spec.entropy_weight == pytest.approx(0.05)
+    assert spec.calibration_dates == (date(2023, 1, 5), date(2023, 1, 6))
+    assert spec.holdout_dates == (date(2023, 7, 19), date(2023, 7, 24))
+
+
+def test_load_phase4_holdout_spec_rejects_overlap(tmp_path) -> None:
+    path = tmp_path / "phase4_recommendation.json"
+    path.write_text(
+        """{
+  "phase": "4E",
+  "selection_metric": "mean_flow_time_seconds",
+  "entropy_weight": 0.05,
+  "calibration_dates": ["2023-01-05"],
+  "holdout_dates": ["2023-01-05"]
+}
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="겹칩니다"):
+        load_phase4_holdout_spec(path)

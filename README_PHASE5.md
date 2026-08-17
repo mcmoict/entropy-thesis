@@ -1,110 +1,152 @@
-# Phase 5 - 다중 날짜 실험 및 검증
+# Phase 5 - Holdout 검증
 
-Phase 5는 Phase 3의 기존 작업자 배치 방법과 Phase 4에서 선택한 Entropy-based Allocation을 **여러 실제 운영일에서 반복 비교**하여 결과의 일반화 가능성을 검증한다.
-
-핵심 원칙은 **Phase 4에서 선택한 λ(lambda)를 validation date마다 다시 최적화하지 않는 것**이다. calibration date에서 한 번 선택한 λ를 고정하고, 각 날짜의 실제 workload 분포에 맞추어 zone별 정수 작업자 수만 다시 계산한다. 이렇게 해야 특정 날짜에 과적합된 λ를 다른 날짜에서 공정하게 검증할 수 있다.
-
-## 1. 비교 방법
-
-각 validation date마다 동일 조건으로 다음 5개 방법을 비교한다.
+Phase 5는 Phase 4A~4E에서 **한 번 확정한 λ\***와 **한 번 분리한 Holdout 날짜**를 그대로 사용하여 다음 5개 작업자 배치 방법을 out-of-sample로 비교한다.
 
 ```text
-1. Baseline             : Picking_Wave.csv의 실제 operator 배정
-2. Random               : 무작위 zone 작업자 배치
-3. Equal                : 활성 zone 균등 배치
-4. Volume Proportional  : zone workload 비례 배치
-5. Entropy-based        : Phase 4에서 선택한 고정 λ 적용
+Baseline / Random / Equal / Volume Proportional / Entropy(λ*)
 ```
 
-작업자 수를 `--workers`로 직접 지정하지 않으면 각 날짜의 실제 observed operator 수를 사용한다.
+가장 중요한 원칙은 Phase 5에서 λ를 다시 최적화하거나 날짜를 다시 분할하지 않는 것이다. Phase 4의 Holdout 데이터는 Phase 4C~4E의 λ 선택에 사용되지 않았으므로, Phase 5에서 최종 일반화 성능을 검증하는 독립 표본이다.
 
-## 2. λ 고정 규칙
+## 1. Phase 4 결과 자동 연결
 
-기본 실행에서는 다음 파일을 읽는다.
+기본 실행은 다음 파일을 읽는다.
 
 ```text
 results/phase4/phase4_recommendation.json
 ```
 
-즉 Phase 4에서 이미 선택한 λ를 그대로 사용한다. 이 파일이 없으면 Phase 4 calibration을 다시 수행한다.
+이 파일에서 다음 값을 동시에 불러온다.
 
-직접 λ를 지정할 수도 있다.
-
-```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --entropy-weight 1
+```text
+- selected λ*
+- primary selection metric
+- Calibration dates
+- frozen Holdout dates
 ```
 
-Phase 4를 강제로 다시 수행하려면:
+현재 저장된 Phase 4 결과는 다음과 같다.
 
-```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --recalibrate --calibration-date 2023-01-05
+```text
+Calibration dates : 92
+Holdout dates     : 40
+Selected λ*       : 0.05
+Primary metric    : mean_flow_time_seconds
 ```
 
-## 3. Validation date 선택
+Phase 5는 recommendation 파일이 없거나, 최신 `phase=4E` 형식이 아니거나, Calibration/Holdout 날짜가 겹치면 실행을 중단한다.
 
-기본값은 calibration date를 제외하고, fully-valid list가 충분한 운영일 중 전체 기간에 걸쳐 **시간축 기준으로 균등하게 12일**을 선택한다.
+## 2. 본 실험 실행
+
+Phase 4가 완료된 프로젝트 루트에서 다음 명령만 실행한다.
 
 ```powershell
 python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 ```
 
-검증 일수 변경:
+기본 실행은 Phase 4에서 고정된 Holdout 40일을 모두 사용한다. 임의 12일 sampling이나 validation-day 재선택은 하지 않는다.
 
-```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --validation-days 20
-```
+## 3. 비교 방법
 
-특정 날짜 직접 지정:
-
-```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --dates 2023-01-06,2023-02-16,2023-03-22,2023-05-16
-```
-
-모든 가능한 날짜 실행:
-
-```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --all-dates
-```
-
-기본적으로 fully-valid picking list가 20개 미만인 날짜는 검증 표본에서 제외한다. 기준을 바꾸려면 `--min-lists`를 사용한다.
-
-## 4. 통계적 검증
-
-운영일을 paired observation으로 두고 Entropy-based 방법과 각 비교 방법 사이에 다음을 계산한다.
+각 Holdout 날짜에서 동일한 warehouse graph, 동일한 실제 picking list, 동일한 시뮬레이션 파라미터를 사용해 다음 방법을 비교한다.
 
 ```text
-- 날짜별 KPI
-- 방법별 평균 / 표준편차 / 중앙값 / 최소 / 최대
-- Entropy의 wins / ties / losses
-- 평균 개선율(%)
-- paired Wilcoxon signed-rank test
-- two-sided p-value
-- p < 0.05 여부
+1. Baseline             : Picking_Wave.csv의 실제 operator 배정
+2. Random               : 활성 zone에 무작위 작업자 배정
+3. Equal                : 활성 zone에 균등 작업자 배정
+4. Volume Proportional  : zone workload 비례 작업자 배정
+5. Entropy-based        : Phase 4에서 고정한 λ* 적용
 ```
 
-Wilcoxon 검정은 날짜별 차이가 정규분포라고 강하게 가정하지 않는 비모수 paired test이다.
+`--workers`를 지정하지 않으면 각 Holdout 날짜의 실제 observed operator 수를 비교 방법의 총 작업자 수로 사용한다.
+
+## 4. Holdout 무결성 규칙
+
+Phase 5는 다음을 허용하지 않는다.
+
+```text
+- λ 재탐색
+- Holdout 재분할
+- Calibration 날짜를 Holdout에 추가
+- 현재 데이터에 없는 Holdout 날짜를 다른 날짜로 대체
+```
+
+현재 데이터셋에서 Phase 4가 고정한 Holdout 날짜가 사라졌다면 데이터셋이 Phase 4 이후 변경된 것으로 간주하여 오류를 발생시킨다.
+
+빠른 smoke test가 필요할 때만 `--dates`로 **기존 Holdout의 부분집합**을 지정할 수 있다.
+
+```powershell
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw --dates 2023-07-19
+```
+
+Holdout이 아닌 날짜를 지정하면 실행하지 않는다.
 
 ## 5. 주요 KPI
 
+Primary KPI는 Phase 4에서 λ* 선택에 사용한 값과 동일하다.
+
 ```text
 mean_flow_time_seconds
+```
+
+추가 비교 KPI는 다음과 같다.
+
+```text
 makespan_seconds
 congestion_wait_seconds
 congestion_conflicts
 total_distance_m
 mean_release_delay_seconds
 mean_spatial_entropy_normalized
+worker_allocation_entropy_normalized
+demand_worker_l1_gap
 ```
 
-기본 primary KPI는 Phase 4와 동일한 `mean_flow_time_seconds`이다.
+## 6. 통계 검증
 
-## 6. 출력 파일
+운영일을 paired observation으로 두고 Entropy(λ*)와 각 비교 방법을 같은 날짜끼리 비교한다.
+
+```text
+Entropy vs Baseline
+Entropy vs Random
+Entropy vs Equal
+Entropy vs Volume Proportional
+```
+
+각 KPI에 대해 다음을 계산한다.
+
+```text
+- 방법별 평균 / 표준편차 / 중앙값 / 최소 / 최대
+- Entropy의 Wins / Ties / Losses
+- 평균 개선율(%)
+- Wilcoxon signed-rank test
+- two-sided p-value
+- p < 0.05 여부
+```
+
+## 7. 정수 작업자 배치 동일성 확인
+
+λ*=0.05처럼 작은 가중치는 연속 점수에서는 차이를 만들더라도 최종 정수 작업자 수로 변환될 때 Volume 배치와 같은 결과를 만들 수 있다.
+
+이를 분리해서 확인하기 위해 날짜별로 다음을 저장한다.
+
+```text
+Entropy allocation == Random allocation ?
+Entropy allocation == Equal allocation ?
+Entropy allocation == Volume allocation ?
+DES result reused from which method ?
+```
+
+따라서 Entropy와 Volume KPI가 동일한 경우에도 그 원인이 **실제 동일 정수 배치인지** 확인할 수 있다.
+
+## 8. 출력 파일
 
 ```text
 results/phase5/
   phase5_daily_summary.csv
   phase5_date_profiles.csv
   phase5_allocations.csv
+  phase5_allocation_equivalence.csv
   phase5_method_summary.csv
   phase5_paired_comparison.csv
   phase5_primary_comparison.csv
@@ -114,45 +156,38 @@ results/phase5/
 
 ### phase5_daily_summary.csv
 
-날짜 × 방법 단위의 핵심 DES 결과이다. 논문의 일별 실험 원자료로 사용할 수 있다.
+Holdout 날짜 × 방법 단위의 DES 결과이다. 40개 날짜를 모두 완료하면 기본적으로 40 × 5 = 200개의 방법별 결과가 저장된다.
 
 ### phase5_method_summary.csv
 
-방법 × KPI 단위의 전체 validation date 요약 통계이다.
+방법 × KPI별 전체 Holdout 요약 통계이다.
 
 ### phase5_paired_comparison.csv
 
-Entropy-based와 Baseline / Random / Equal / Volume Proportional을 KPI별로 paired 비교한다. 개선율, 승/무/패, Wilcoxon p-value가 포함된다.
+Entropy(λ*)와 네 비교 방법의 날짜별 paired 비교 결과이다.
 
 ### phase5_primary_comparison.csv
 
-Phase 4에서 λ 선택에 사용한 primary KPI만 따로 추린 논문용 핵심 비교표이다.
+Phase 4에서 사용한 primary KPI만 추린 논문용 핵심 비교표이다.
 
-## 7. 현재 Phase 4 결과에 대한 중요한 해석
+### phase5_allocation_equivalence.csv
 
-현재 프로젝트의 `phase4_recommendation.json`에는 다음과 같이 저장되어 있다.
+Entropy 정수 작업자 배치가 Random / Equal / Volume과 동일한 날짜인지 기록한다. λ*=0.05의 실제 효과가 정수화 과정에서 소멸하는지 분석할 때 사용한다.
 
-```text
-selection metric = mean_flow_time_seconds
-selected lambda  = 0
-```
+### phase5_metadata.json
 
-Phase 4 수식에서 `λ=0`은 Volume Proportional Allocation과 동일하다. 따라서 이 값을 그대로 Phase 5에 적용하면 Entropy-based와 Volume Proportional이 같은 worker allocation을 만들며 동일한 DES 결과가 나오는 것이 정상이다.
+Phase 4 Calibration/Holdout 날짜, λ*, 실행 파라미터, 완료/skip 날짜, 통계 검정 규칙을 보존한다.
 
-이 결과는 실패가 아니라 중요한 연구 결과이다. 현재 calibration 조건과 Mean Flow Time 기준에서는 **추가적인 entropy regularization(λ > 0)이 성능 개선으로 선택되지 않았다**는 뜻이다. Phase 5는 이 결론이 여러 날짜에서도 유지되는지 검증한다.
+## 9. 권장 실행 순서
 
-## 8. 권장 실행 순서
-
-먼저 빠른 smoke test:
+코드 경로만 빠르게 확인하려면 Phase 4 Holdout 첫 날짜 1개로 smoke test를 한다.
 
 ```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --validation-days 3 --max-lists 20 --min-lists 10
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw --dates 2023-07-19 --max-lists 20
 ```
 
-그 다음 본 실험:
+최종 논문 실험은 별도 옵션 없이 전체 Holdout을 실행한다.
 
 ```powershell
-python -m entropy_thesis.simulation.phase5 --data-dir data/raw --validation-days 12
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 ```
-
-논문 최종 robustness check가 필요하면 명시적으로 날짜 수를 늘리거나 `--all-dates`를 사용할 수 있다.

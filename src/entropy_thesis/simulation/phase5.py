@@ -29,12 +29,9 @@ from .phase3 import (
     zone_workload,
 )
 from .phase4 import (
-    DEFAULT_ENTROPY_WEIGHTS,
     DEFAULT_SELECTION_METRIC,
     MAXIMIZE_METRICS,
-    SelectionMetric,
     allocate_phase4_workers,
-    build_and_run_phase4,
 )
 from .progress import ConsoleProgress, format_duration
 from .warehouse import WarehouseGraph
@@ -56,9 +53,7 @@ PHASE5_METHODS: tuple[Phase5Method, ...] = (
     "entropy_based",
 )
 
-DEFAULT_VALIDATION_DAYS = 12
-DEFAULT_MIN_LISTS_PER_DATE = 20
-
+DEFAULT_VALIDATION_DAYS = 12  # legacy helper/CLI compatibility only
 COMPARISON_METRICS: tuple[str, ...] = (
     "mean_flow_time_seconds",
     "makespan_seconds",
@@ -80,6 +75,15 @@ AGGREGATE_METRICS: tuple[str, ...] = (
     "worker_allocation_entropy_normalized",
     "demand_worker_l1_gap",
 )
+
+
+@dataclass(frozen=True)
+class Phase4HoldoutSpec:
+    entropy_weight: float
+    selection_metric: str
+    calibration_dates: tuple[date, ...]
+    holdout_dates: tuple[date, ...]
+    source_path: Path
 
 
 @dataclass(frozen=True)
@@ -116,13 +120,19 @@ class Phase5Run:
     warehouse: WarehouseGraph
     audit: Phase1Audit
     zones: tuple[AisleZone, ...]
-    calibration_date: date
+    calibration_dates: tuple[date, ...]
+    holdout_dates: tuple[date, ...]
     entropy_weight: float
     entropy_source: str
     selection_metric: str
     requested_dates: tuple[date, ...]
     results: tuple[Phase5DateResult, ...]
     skipped: tuple[dict[str, object], ...]
+
+    @property
+    def calibration_date(self) -> date:
+        """Backward-compatible representative date; Phase 5 uses calibration_dates."""
+        return self.calibration_dates[0]
 
 
 def available_phase5_dates(
@@ -199,100 +209,64 @@ def select_validation_dates(
     return _evenly_spaced_dates(candidates, validation_days)
 
 
-def _parse_phase4_recommendation(path: Path) -> tuple[float, str]:
-    with path.open("r", encoding="utf-8") as file:
+def _parse_iso_date_list(payload: object, *, field: str) -> tuple[date, ...]:
+    if not isinstance(payload, list) or not payload:
+        raise ValueError(f"Phase 4 recommendation에 {field}가 비어 있거나 없습니다.")
+    try:
+        values = tuple(date.fromisoformat(str(value)) for value in payload)
+    except ValueError as exc:
+        raise ValueError(f"Phase 4 recommendation의 {field} 날짜 형식이 잘못되었습니다.") from exc
+    if len(values) != len(set(values)):
+        raise ValueError(f"Phase 4 recommendation의 {field}에 중복 날짜가 있습니다.")
+    return tuple(sorted(values))
+
+
+def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
+    """Load the immutable Phase 4E lambda and date split used by Phase 5.
+
+    Phase 5 must not resample dates or recalibrate lambda. The recommendation
+    file is therefore the single source of truth for both λ* and the holdout set.
+    """
+
+    recommendation = Path(path)
+    if not recommendation.exists():
+        raise FileNotFoundError(
+            "Phase 5 requires the Phase 4 recommendation file. "
+            f"Run Phase 4 first or provide --recommendation: {recommendation}"
+        )
+    with recommendation.open("r", encoding="utf-8") as file:
         payload = json.load(file)
+
+    if str(payload.get("phase", "")) != "4E":
+        raise ValueError(
+            "Phase 5에는 최신 Phase 4A~4E recommendation이 필요합니다 "
+            f"(phase={payload.get('phase')!r})."
+        )
+
     entropy_weight = float(payload["entropy_weight"])
     if not math.isfinite(entropy_weight) or entropy_weight < 0:
         raise ValueError(f"잘못된 Phase 4 entropy_weight입니다: {entropy_weight}")
+
     selection_metric = str(payload.get("selection_metric", DEFAULT_SELECTION_METRIC))
-    return entropy_weight, selection_metric
+    if selection_metric not in COMPARISON_METRICS:
+        raise ValueError(f"지원하지 않는 Phase 4 selection_metric입니다: {selection_metric}")
 
+    calibration_dates = _parse_iso_date_list(payload.get("calibration_dates"), field="calibration_dates")
+    holdout_dates = _parse_iso_date_list(payload.get("holdout_dates"), field="holdout_dates")
+    overlap = set(calibration_dates).intersection(holdout_dates)
+    if overlap:
+        raise ValueError(
+            "Phase 4 recommendation의 Calibration/Holdout 날짜가 겹칩니다: "
+            + ", ".join(value.isoformat() for value in sorted(overlap))
+        )
 
-def _metadata_calibration_date(recommendation_path: Path) -> date | None:
-    metadata_path = recommendation_path.with_name("phase4_metadata.json")
-    if not metadata_path.exists():
-        return None
-    try:
-        with metadata_path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-        return date.fromisoformat(str(payload["selected_date"]))
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None
-
-
-def resolve_entropy_weight(
-    data_dir: str | Path,
-    *,
-    calibration_date: date | None,
-    entropy_weight: float | None,
-    recommendation_path: str | Path | None,
-    recalibrate: bool,
-    number_of_zones: int,
-    total_workers: int | None,
-    volume_basis: Literal["tasks", "units"],
-    minimum_per_active_zone: int,
-    entropy_weights: Iterable[float],
-    selection_metric: SelectionMetric,
-    seed: int,
-    walking_speed_mps: float,
-    pick_seconds_per_unit: float,
-    edge_capacity: int,
-    pick_node_capacity: int,
-    sample_seconds: float,
-    return_to_io: bool,
-    max_lists: int | None,
-) -> tuple[date | None, float, str, str]:
-    if entropy_weight is not None:
-        numeric = float(entropy_weight)
-        if not math.isfinite(numeric) or numeric < 0:
-            raise ValueError("entropy_weight는 0 이상의 유한한 수여야 합니다.")
-        return calibration_date, numeric, "cli", selection_metric
-
-    recommendation = Path(recommendation_path) if recommendation_path is not None else None
-    if not recalibrate and recommendation is not None and recommendation.exists():
-        numeric, stored_metric = _parse_phase4_recommendation(recommendation)
-        stored_date = _metadata_calibration_date(recommendation)
-        resolved_date = calibration_date or stored_date
-        if calibration_date is not None and stored_date is not None and calibration_date != stored_date:
-            raise ValueError(
-                "Phase 4 recommendation의 calibration date가 요청값과 다릅니다. "
-                f"recommendation={stored_date.isoformat()}, requested={calibration_date.isoformat()}"
-            )
-        return resolved_date, numeric, f"phase4_recommendation:{recommendation}", stored_metric
-
-    (
-        _,
-        _,
-        _,
-        selected_date,
-        _,
-        _,
-        _,
-        _,
-        _,
-        selected,
-        _,
-    ) = build_and_run_phase4(
-        data_dir,
-        target_date=calibration_date,
-        max_lists=max_lists,
-        number_of_zones=number_of_zones,
-        total_workers=total_workers,
-        volume_basis=volume_basis,
-        minimum_per_active_zone=minimum_per_active_zone,
-        entropy_weights=entropy_weights,
+    return Phase4HoldoutSpec(
+        entropy_weight=entropy_weight,
         selection_metric=selection_metric,
-        seed=seed,
-        walking_speed_mps=walking_speed_mps,
-        pick_seconds_per_unit=pick_seconds_per_unit,
-        edge_capacity=edge_capacity,
-        pick_node_capacity=pick_node_capacity,
-        sample_seconds=sample_seconds,
-        return_to_io=return_to_io,
-        progress=None,
+        calibration_dates=calibration_dates,
+        holdout_dates=holdout_dates,
+        source_path=recommendation,
     )
-    return selected_date, selected.candidate.entropy_weight, "phase4_recalibration", selection_metric
 
 
 def _run_one_date(
@@ -455,22 +429,14 @@ def _run_one_date(
 def build_and_run_phase5(
     data_dir: str | Path,
     *,
-    calibration_date: date | None = None,
     validation_dates: Iterable[date] | None = None,
-    validation_days: int = DEFAULT_VALIDATION_DAYS,
-    all_dates: bool = False,
-    min_lists_per_date: int = DEFAULT_MIN_LISTS_PER_DATE,
     max_lists: int | None = None,
     number_of_zones: int = 4,
     total_workers: int | None = None,
     volume_basis: Literal["tasks", "units"] = "tasks",
     minimum_per_active_zone: int = 1,
     seed: int = 42,
-    entropy_weight: float | None = None,
-    recommendation_path: str | Path | None = Path("results/phase4/phase4_recommendation.json"),
-    recalibrate: bool = False,
-    entropy_weights: Iterable[float] = DEFAULT_ENTROPY_WEIGHTS,
-    selection_metric: SelectionMetric = DEFAULT_SELECTION_METRIC,
+    recommendation_path: str | Path = Path("results/phase4/phase4_recommendation.json"),
     walking_speed_mps: float = 1.2,
     pick_seconds_per_unit: float = 3.0,
     edge_capacity: int = 1,
@@ -479,76 +445,62 @@ def build_and_run_phase5(
     return_to_io: bool = True,
     progress: ConsoleProgress | None = None,
 ) -> Phase5Run:
-    if min_lists_per_date <= 0:
-        raise ValueError("min_lists_per_date는 1 이상이어야 합니다.")
+    """Run the frozen Phase 4 holdout set using five allocation methods.
+
+    The Phase 4 recommendation is authoritative for λ*, calibration dates, and
+    holdout dates. Optional validation_dates can only select a subset of the
+    frozen holdout set (useful for smoke tests); it cannot introduce new dates.
+    """
+
     if max_lists is not None and max_lists <= 0:
         raise ValueError("max_lists는 1 이상이어야 합니다.")
 
+    spec = load_phase4_holdout_spec(recommendation_path)
     if progress is not None:
-        progress.report(0.02, "Loading Phase 5 input data")
+        progress.report(
+            0.02,
+            "Loading Phase 4E frozen holdout specification",
+            current=(
+                f"lambda={spec.entropy_weight:g}, "
+                f"calibration={len(spec.calibration_dates):,}, holdout={len(spec.holdout_dates):,}"
+            ),
+        )
+        progress.report(0.04, "Loading Phase 5 input data")
     dataset = load_dataset(data_dir)
     if progress is not None:
-        progress.report(0.04, "Building deterministic warehouse graph")
+        progress.report(0.06, "Building deterministic warehouse graph")
     warehouse = WarehouseGraph.build(
         dataset.storage_locations,
         dataset.support_points,
         deterministic_order=True,
     )
     audit = audit_picking_locations(warehouse, dataset.picking_lists)
+    if progress is not None:
+        progress.report(0.08, "Building physical aisle zones")
     zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
     grouped = _date_map(warehouse, dataset.picking_lists)
-    available = tuple(sorted(grouped))
-    if not available:
-        raise ValueError("Phase 5에서 사용할 fully-valid operating date가 없습니다.")
+    available = set(grouped)
 
-    resolved_calibration, selected_lambda, entropy_source, resolved_metric = resolve_entropy_weight(
-        data_dir,
-        calibration_date=calibration_date,
-        entropy_weight=entropy_weight,
-        recommendation_path=recommendation_path,
-        recalibrate=recalibrate,
-        number_of_zones=number_of_zones,
-        total_workers=total_workers,
-        volume_basis=volume_basis,
-        minimum_per_active_zone=minimum_per_active_zone,
-        entropy_weights=entropy_weights,
-        selection_metric=selection_metric,
-        seed=seed,
-        walking_speed_mps=walking_speed_mps,
-        pick_seconds_per_unit=pick_seconds_per_unit,
-        edge_capacity=edge_capacity,
-        pick_node_capacity=pick_node_capacity,
-        sample_seconds=sample_seconds,
-        return_to_io=return_to_io,
-        max_lists=max_lists,
-    )
-    calibration = resolved_calibration or available[0]
-
-    requested = select_validation_dates(
-        available,
-        calibration_date=calibration,
-        explicit_dates=validation_dates,
-        validation_days=validation_days,
-        all_dates=all_dates,
-    )
-    if not requested:
-        raise ValueError("calibration date를 제외한 validation date가 없습니다.")
-
-    # For automatic sampling, remove dates that are too small before spreading
-    # dates across the entire observation period. Explicit dates are retained and
-    # reported as skipped when they fail the minimum-size rule.
-    if validation_dates is None:
-        eligible_for_size = [
-            value for value in available
-            if value != calibration and len(grouped[value]) >= min_lists_per_date
-        ]
-        requested = (
-            tuple(eligible_for_size)
-            if all_dates
-            else _evenly_spaced_dates(eligible_for_size, validation_days)
+    missing_holdout = [value for value in spec.holdout_dates if value not in available]
+    if missing_holdout:
+        raise ValueError(
+            "Phase 4에서 고정한 Holdout 날짜가 현재 데이터에 없습니다. "
+            "데이터셋이 Phase 4 이후 변경되었는지 확인하십시오: "
+            + ", ".join(value.isoformat() for value in missing_holdout)
         )
+
+    if validation_dates is None:
+        requested = spec.holdout_dates
+    else:
+        requested = tuple(sorted(dict.fromkeys(validation_dates)))
+        outside = [value for value in requested if value not in set(spec.holdout_dates)]
+        if outside:
+            raise ValueError(
+                "--dates에는 Phase 4에서 고정된 Holdout 날짜만 지정할 수 있습니다: "
+                + ", ".join(value.isoformat() for value in outside)
+            )
         if not requested:
-            raise ValueError("min_lists_per_date 조건을 만족하는 validation date가 없습니다.")
+            raise ValueError("Phase 5 Holdout 날짜가 비어 있습니다.")
 
     results: list[Phase5DateResult] = []
     skipped: list[dict[str, object]] = []
@@ -556,13 +508,12 @@ def build_and_run_phase5(
         selected_lists = list(grouped[selected_date])
         if max_lists is not None:
             selected_lists = selected_lists[:max_lists]
-        if len(selected_lists) < min_lists_per_date:
+        if not selected_lists:
             skipped.append(
                 {
                     "selected_date": selected_date.isoformat(),
-                    "reason": "too_few_lists",
-                    "picking_lists": len(selected_lists),
-                    "minimum_required": min_lists_per_date,
+                    "reason": "no_lists_after_limit",
+                    "picking_lists": 0,
                 }
             )
             continue
@@ -573,7 +524,7 @@ def build_and_run_phase5(
                     zones,
                     selected_date,
                     selected_lists,
-                    entropy_weight=selected_lambda,
+                    entropy_weight=spec.entropy_weight,
                     total_workers=total_workers,
                     volume_basis=volume_basis,
                     minimum_per_active_zone=minimum_per_active_zone,
@@ -600,17 +551,18 @@ def build_and_run_phase5(
             )
 
     if not results:
-        raise ValueError("Phase 5 validation을 완료한 날짜가 없습니다. skipped 결과를 확인하십시오.")
+        raise ValueError("Phase 5 Holdout 검증을 완료한 날짜가 없습니다. skipped 결과를 확인하십시오.")
 
     return Phase5Run(
         dataset=dataset,
         warehouse=warehouse,
         audit=audit,
         zones=zones,
-        calibration_date=calibration,
-        entropy_weight=selected_lambda,
-        entropy_source=entropy_source,
-        selection_metric=resolved_metric,
+        calibration_dates=spec.calibration_dates,
+        holdout_dates=spec.holdout_dates,
+        entropy_weight=spec.entropy_weight,
+        entropy_source=f"phase4_recommendation:{spec.source_path}",
+        selection_metric=spec.selection_metric,
         requested_dates=tuple(requested),
         results=tuple(results),
         skipped=tuple(skipped),
@@ -703,6 +655,30 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
                     }
                 )
+    return records
+
+
+def phase5_allocation_equivalence_records(run: Phase5Run) -> list[dict[str, object]]:
+    """Record whether Entropy(λ*) collapses to another integer allocation."""
+
+    records: list[dict[str, object]] = []
+    for result in run.results:
+        counts_by_method = {item.method: item.worker_counts for item in result.methods}
+        entropy_counts = result.entropy_worker_counts
+        records.append(
+            {
+                "selected_date": result.selected_date.isoformat(),
+                "entropy_weight": run.entropy_weight,
+                "entropy_worker_counts": "|".join(str(v) for v in entropy_counts),
+                "random_worker_counts": "|".join(str(v) for v in counts_by_method["random"]),
+                "equal_worker_counts": "|".join(str(v) for v in counts_by_method["equal"]),
+                "volume_worker_counts": "|".join(str(v) for v in counts_by_method["volume_proportional"]),
+                "same_as_random": entropy_counts == counts_by_method["random"],
+                "same_as_equal": entropy_counts == counts_by_method["equal"],
+                "same_as_volume": entropy_counts == counts_by_method["volume_proportional"],
+                "des_reused_from": result.entropy_reused_from,
+            }
+        )
     return records
 
 
@@ -815,6 +791,9 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
     pd.DataFrame(phase5_allocation_records(run)).to_csv(
         output_dir / "phase5_allocations.csv", index=False
     )
+    pd.DataFrame(phase5_allocation_equivalence_records(run)).to_csv(
+        output_dir / "phase5_allocation_equivalence.csv", index=False
+    )
     pd.DataFrame(aggregate_method_records(daily)).to_csv(
         output_dir / "phase5_method_summary.csv", index=False
     )
@@ -837,19 +816,21 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
 
     metadata = {
         "phase": 5,
-        "purpose": "multi-date out-of-sample validation of Phase 3 baselines and the Phase 4 selected entropy allocation",
-        "calibration_date": run.calibration_date.isoformat(),
-        "validation_dates_requested": [value.isoformat() for value in run.requested_dates],
-        "validation_dates_completed": [value.selected_date.isoformat() for value in run.results],
-        "validation_dates_skipped": list(run.skipped),
+        "purpose": "out-of-sample holdout validation of Baseline/Random/Equal/Volume/Entropy(lambda*)",
+        "calibration_dates": [value.isoformat() for value in run.calibration_dates],
+        "holdout_dates_frozen": [value.isoformat() for value in run.holdout_dates],
+        "holdout_dates_requested": [value.isoformat() for value in run.requested_dates],
+        "holdout_dates_completed": [value.selected_date.isoformat() for value in run.results],
+        "holdout_dates_skipped": list(run.skipped),
         "entropy": {
             "weight": run.entropy_weight,
             "source": run.entropy_source,
             "selection_metric": run.selection_metric,
-            "fixed_across_validation_dates": True,
+            "fixed_across_holdout_dates": True,
             "interpretation": (
-                "lambda is calibrated once and held fixed across validation dates; "
-                "zone worker counts are recalculated from each date's workload distribution"
+                "lambda is selected only from Phase 4 calibration dates and held fixed across "
+                "the untouched Phase 4 holdout dates; zone worker counts are recalculated from "
+                "each holdout date's workload distribution"
             ),
         },
         "input": {
@@ -866,21 +847,17 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
             "pairing_unit": "operating date",
             "primary_metric": run.selection_metric,
         },
-        "important_note": (
-            "If selected lambda is 0, entropy_based is mathematically equivalent to "
-            "volume_proportional under the same workload and integer allocation rules. "
-            "Phase 5 reports this as a valid tie rather than forcing an entropy advantage."
+        "holdout_integrity": (
+            "Phase 5 does not recalibrate lambda, resplit dates, or substitute non-holdout dates. "
+            "A CLI --dates subset is allowed only for smoke tests and must remain inside the frozen holdout set."
+        ),
+        "allocation_equivalence_note": (
+            "Because worker counts are integers, Entropy(lambda*) may produce the same allocation as "
+            "Volume/Equal/Random on some dates. phase5_allocation_equivalence.csv records this explicitly."
         ),
     }
     with (output_dir / "phase5_metadata.json").open("w", encoding="utf-8") as file:
         json.dump(metadata, file, ensure_ascii=False, indent=2)
-
-
-def _parse_date(value: str) -> date:
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("날짜는 YYYY-MM-DD 형식이어야 합니다.") from exc
 
 
 def _parse_dates(value: str) -> tuple[date, ...]:
@@ -899,16 +876,6 @@ def _parse_dates(value: str) -> tuple[date, ...]:
     return result
 
 
-def _parse_entropy_weights(value: str) -> tuple[float, ...]:
-    try:
-        values = tuple(float(part.strip()) for part in value.split(",") if part.strip())
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("entropy weight는 숫자여야 합니다.") from exc
-    if not values or any(not math.isfinite(item) or item < 0 for item in values):
-        raise argparse.ArgumentTypeError("entropy weight는 0 이상의 유한한 수여야 합니다.")
-    return tuple(sorted(dict.fromkeys(values)))
-
-
 def _fmt_metric(value: object) -> str:
     if value is None or pd.isna(value):
         return "n/a"
@@ -917,42 +884,32 @@ def _fmt_metric(value: object) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Entropy Thesis - Phase 5 multi-date validation"
+        description=(
+            "Entropy Thesis - Phase 5 frozen holdout validation: "
+            "Baseline / Random / Equal / Volume / Entropy(lambda*)"
+        )
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--calibration-date", type=_parse_date, default=None)
     parser.add_argument(
         "--dates",
         type=_parse_dates,
         default=None,
-        help="explicit validation dates: YYYY-MM-DD,YYYY-MM-DD,...",
+        help=(
+            "optional smoke-test subset; every date must belong to the Phase 4 frozen holdout set "
+            "(YYYY-MM-DD,YYYY-MM-DD,...)"
+        ),
     )
-    parser.add_argument("--validation-days", type=int, default=DEFAULT_VALIDATION_DAYS)
-    parser.add_argument("--all-dates", action="store_true")
-    parser.add_argument("--min-lists", type=int, default=DEFAULT_MIN_LISTS_PER_DATE)
     parser.add_argument("--max-lists", type=int, default=None)
     parser.add_argument("--zones", type=int, default=4)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--volume-basis", choices=("tasks", "units"), default="tasks")
     parser.add_argument("--minimum-per-active-zone", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--entropy-weight", type=float, default=None)
     parser.add_argument(
         "--recommendation",
         type=Path,
         default=Path("results/phase4/phase4_recommendation.json"),
-        help="Phase 4 recommendation JSON used unless --entropy-weight or --recalibrate is given",
-    )
-    parser.add_argument("--recalibrate", action="store_true")
-    parser.add_argument(
-        "--entropy-weights",
-        type=_parse_entropy_weights,
-        default=DEFAULT_ENTROPY_WEIGHTS,
-    )
-    parser.add_argument(
-        "--selection-metric",
-        choices=tuple(COMPARISON_METRICS),
-        default=DEFAULT_SELECTION_METRIC,
+        help="Phase 4E recommendation JSON containing lambda*, calibration dates, and frozen holdout dates",
     )
     parser.add_argument("--speed", type=float, default=1.2)
     parser.add_argument("--pick-seconds", type=float, default=3.0)
@@ -964,25 +921,17 @@ def main() -> None:
     args = parser.parse_args()
 
     progress = ConsoleProgress()
-    progress.start("Phase 5 multi-date experiment and validation")
+    progress.start("Phase 5 frozen holdout validation")
     run = build_and_run_phase5(
         args.data_dir,
-        calibration_date=args.calibration_date,
         validation_dates=args.dates,
-        validation_days=args.validation_days,
-        all_dates=args.all_dates,
-        min_lists_per_date=args.min_lists,
         max_lists=args.max_lists,
         number_of_zones=args.zones,
         total_workers=args.workers,
         volume_basis=args.volume_basis,
         minimum_per_active_zone=args.minimum_per_active_zone,
         seed=args.seed,
-        entropy_weight=args.entropy_weight,
         recommendation_path=args.recommendation,
-        recalibrate=args.recalibrate,
-        entropy_weights=args.entropy_weights,
-        selection_metric=args.selection_metric,
         walking_speed_mps=args.speed,
         pick_seconds_per_unit=args.pick_seconds,
         edge_capacity=args.edge_capacity,
@@ -993,10 +942,8 @@ def main() -> None:
     )
 
     parameters = {
-        "validation_days": args.validation_days,
-        "all_dates": args.all_dates,
-        "explicit_dates": [value.isoformat() for value in args.dates] if args.dates else None,
-        "min_lists_per_date": args.min_lists,
+        "holdout_source": str(args.recommendation),
+        "explicit_holdout_subset": [value.isoformat() for value in args.dates] if args.dates else None,
         "max_lists": args.max_lists,
         "zones": args.zones,
         "workers": args.workers,
@@ -1015,19 +962,35 @@ def main() -> None:
     progress.complete("Phase 5 processing completed")
 
     daily = pd.DataFrame(phase5_daily_records(run))
+    method_summary = pd.DataFrame(aggregate_method_records(daily))
     paired = pd.DataFrame(paired_comparison_records(daily))
     primary = paired[paired["metric"] == run.selection_metric]
+    primary_methods = method_summary[method_summary["metric"] == run.selection_metric]
+    equivalence = phase5_allocation_equivalence_records(run)
+    same_as_volume = sum(bool(row["same_as_volume"]) for row in equivalence)
 
     print()
-    print("=== Phase 5 Multi-Date Validation ===")
-    print(f"Calibration date     : {run.calibration_date.isoformat()}")
-    print(f"Fixed entropy lambda : {run.entropy_weight:g}")
-    print(f"Lambda source        : {run.entropy_source}")
-    print(f"Primary metric       : {run.selection_metric}")
-    print(f"Validation dates     : {len(run.results):,} completed / {len(run.requested_dates):,} requested")
-    print(f"Skipped dates        : {len(run.skipped):,}")
+    print("=== Phase 5 | Frozen Holdout Validation ===")
+    print(f"Phase 4 calibration   : {len(run.calibration_dates):,} dates ({run.calibration_dates[0]} .. {run.calibration_dates[-1]})")
+    print(f"Frozen holdout        : {len(run.holdout_dates):,} dates ({run.holdout_dates[0]} .. {run.holdout_dates[-1]})")
+    print(f"Holdout executed      : {len(run.results):,} completed / {len(run.requested_dates):,} requested")
+    print(f"Skipped dates         : {len(run.skipped):,}")
+    print(f"Fixed entropy lambda  : {run.entropy_weight:g}")
+    print(f"Lambda source         : {run.entropy_source}")
+    print(f"Primary metric        : {run.selection_metric}")
+    print("Lambda recalibration  : no")
+    print("Holdout resampling    : no")
     print()
-    print("=== Primary KPI: Entropy vs Comparators ===")
+    print("=== Primary KPI | Method Statistics ===")
+    print("Method                  Mean              Std")
+    for row in primary_methods.to_dict("records"):
+        print(
+            f"{str(row['method']):<22} "
+            f"{_fmt_metric(row['mean']):>12}   "
+            f"{_fmt_metric(row['std']):>14}"
+        )
+    print()
+    print("=== Primary KPI | Entropy vs Comparators ===")
     print("Comparator            Entropy mean   Comparator mean   Improve(%)   W/T/L   p-value")
     for row in primary.to_dict("records"):
         print(
@@ -1036,18 +999,18 @@ def main() -> None:
             f"{_fmt_metric(row['comparator_mean']):>15}   "
             f"{_fmt_metric(row['mean_improvement_pct']):>10}   "
             f"{int(row['wins'])}/{int(row['ties'])}/{int(row['losses'])}   "
-            f"{float(row['wilcoxon_p_value_two_sided']):.4f}"
-        )
-    if math.isclose(run.entropy_weight, 0.0, abs_tol=1e-12):
-        print()
-        print(
-            "NOTE: selected lambda=0 -> entropy_based is equivalent to "
-            "volume_proportional under the Phase 4 formulation."
+            f"{float(row['wilcoxon_p_value_two_sided']):.6g}"
         )
     print()
-    print(f"Results              : {args.output_dir}")
+    print("=== Integer Allocation Equivalence ===")
     print(
-        f"Total execution time : {format_duration(progress.elapsed_seconds)} "
+        f"Entropy allocation == Volume allocation : "
+        f"{same_as_volume:,}/{len(equivalence):,} holdout dates"
+    )
+    print()
+    print(f"Results               : {args.output_dir}")
+    print(
+        f"Total execution time  : {format_duration(progress.elapsed_seconds)} "
         f"({progress.elapsed_seconds:,.2f} s)"
     )
 
