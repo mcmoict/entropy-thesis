@@ -97,6 +97,7 @@ congestion_wait_seconds
 congestion_conflicts
 total_distance_m
 mean_release_delay_seconds
+mean_spatial_entropy_multiworker
 mean_spatial_entropy_normalized
 worker_allocation_entropy_normalized
 demand_worker_l1_gap
@@ -107,19 +108,50 @@ Phase 5 콘솔에는 Phase 3의 `=== Comparison ===` 형식을 그대로 확장�
 
 ```text
 === Comparison | Holdout Mean (40 dates) ===
-Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   Mean flow time(s)   Makespan(s)   Mean spatial H
-baseline                  ...          ...        ...           ...                    ...                ...           ...              ...
-random                    ...          ...        ...           ...                    ...                ...           ...              ...
-equal                     ...          ...        ...           ...                    ...                ...           ...              ...
-volume_proportional       ...          ...        ...           ...                    ...                ...           ...              ...
-entropy_based             ...          ...        ...           ...                    ...                ...           ...              ...
+Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   Mean flow time(s)   Makespan(s)   Mean spatial H (2+ workers)   Mean spatial H
+baseline                  ...          ...        ...           ...                    ...                ...           ...                   ...              ...
+random                    ...          ...        ...           ...                    ...                ...           ...                   ...              ...
+equal                     ...          ...        ...           ...                    ...                ...           ...                   ...              ...
+volume_proportional       ...          ...        ...           ...                    ...                ...           ...                   ...              ...
+entropy_based             ...          ...        ...           ...                    ...                ...           ...                   ...              ...
 ```
 
 Phase 3의 표는 한 운영일의 KPI지만, Phase 5의 표는 완료된 Holdout 날짜별 KPI를
 방법별로 산술평균한 값이다. 따라서 `Conflicts` 역시 정수 총계가 아니라
 **Holdout 날짜당 평균 충돌 수**로 소수점이 표시될 수 있다.
 
-## 6. 통계 검증
+`Mean spatial H (2+ workers)`는 표본 시점에 active worker가 2명 이상인 경우만 대상으로 한
+평균 spatial entropy이며, `Mean spatial H`는 전체 표본 시점을 대상으로 한 평균이다.
+
+## 6. 작업자 배치 비교
+
+Phase 5는 KPI 표와 별도로 각 방법의 인력배치 규칙과 Zone별 Holdout 평균 배치를 출력한다.
+
+```text
+=== Worker Allocation Rules ===
+baseline            : Picking_Wave.csv의 원본 operator -> picking-list 배정을 그대로 유지
+random              : 활성 Zone 최소 인원 + 잔여 인원 seed 기반 무작위 배치
+equal               : 활성 Zone에 가능한 균등 배치
+volume_proportional : 날짜별 Zone workload 비율에 비례 배치
+entropy_based       : 고정 λ*를 적용한 entropy-regularized workload 배치
+
+=== Worker Allocation | Holdout Mean by Zone (40 dates) ===
+Zone   Workload(%)   Baseline*   Random   Equal   Volume   Entropy   Baseline touch**
+Z01          ...         ...      ...      ...      ...       ...              ...
+...
+```
+
+Baseline은 다른 네 방법과 달리 작업자를 하나의 Zone에 고정하지 않는다. 따라서 비교표의
+`Baseline*`은 **비교용 dominant-zone projection**이다. 날짜별로 각 원본 operator가 담당한
+picking list workload를 Zone별로 합산한 뒤 가장 큰 Zone에 operator를 한 번만 귀속하여 계산하며,
+그 합은 해당 날짜의 observed worker 수와 같다. 실제 baseline DES는 이 projection을 사용하지 않고
+기존 원본 operator 배정을 그대로 유지한다.
+
+`Baseline touch**`는 해당 Zone을 dominant zone으로 갖는 picking list를 하나 이상 수행한 원본
+operator의 수이다. 한 operator가 여러 Zone에 나타날 수 있으므로 Zone 합계는 전체 작업자 수보다
+클 수 있다.
+
+## 7. 통계 검증
 
 운영일을 paired observation으로 두고 Entropy(λ*)와 각 비교 방법을 같은 날짜끼리 비교한다.
 
@@ -141,7 +173,7 @@ Entropy vs Volume Proportional
 - p < 0.05 여부
 ```
 
-## 7. 정수 작업자 배치 동일성 확인
+## 8. 정수 작업자 배치 동일성 확인
 
 λ*=0.05처럼 작은 가중치는 연속 점수에서는 차이를 만들더라도 최종 정수 작업자 수로 변환될 때 Volume 배치와 같은 결과를 만들 수 있다.
 
@@ -156,13 +188,14 @@ DES result reused from which method ?
 
 따라서 Entropy와 Volume KPI가 동일한 경우에도 그 원인이 **실제 동일 정수 배치인지** 확인할 수 있다.
 
-## 8. 출력 파일
+## 9. 출력 파일
 
 ```text
 results/phase5/
   phase5_daily_summary.csv
   phase5_date_profiles.csv
   phase5_allocations.csv
+  phase5_allocation_comparison.csv
   phase5_allocation_equivalence.csv
   phase5_method_summary.csv
   phase5_comparison_summary.csv
@@ -185,6 +218,22 @@ Holdout 날짜 × 방법 단위의 DES 결과이다. 40개 날짜를 모두 완�
 콘솔의 `Comparison | Holdout Mean` 표와 동일한 Phase 3 스타일의 wide-format 요약이다.
 Baseline / Random / Equal / Volume Proportional / Entropy-based 순서로 Holdout 평균 KPI를 저장한다.
 
+### phase5_allocation_comparison.csv
+
+Holdout 날짜 × Zone 단위로 workload와 인력배치를 wide-format으로 저장한다.
+
+```text
+baseline_dominant_zone_workers
+baseline_distinct_operators_touching_zone
+random_workers
+equal_workers
+volume_proportional_workers
+entropy_based_workers
+```
+
+이 파일은 Phase 6에서 Volume과 Entropy의 정수 배치가 달라진 날짜를 골라 Zone별 수요분포 →
+인력배치 → KPI 변화를 추적할 때 바로 사용할 수 있다.
+
 ### phase5_paired_comparison.csv
 
 Entropy(λ*)와 네 비교 방법의 날짜별 paired 비교 결과이다.
@@ -201,7 +250,7 @@ Entropy 정수 작업자 배치가 Random / Equal / Volume과 동일한 날짜�
 
 Phase 4 Calibration/Holdout 날짜, λ*, 실행 파라미터, 완료/skip 날짜, 통계 검정 규칙을 보존한다.
 
-## 9. 권장 실행 순서
+## 10. 권장 실행 순서
 
 코드 경로만 빠르게 확인하려면 Phase 4 Holdout 첫 날짜 1개로 smoke test를 한다.
 

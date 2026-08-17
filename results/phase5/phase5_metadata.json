@@ -265,5 +265,6 @@
     "primary_metric": "mean_flow_time_seconds"
   },
   "holdout_integrity": "Phase 5 does not recalibrate lambda, resplit dates, or substitute non-holdout dates. A CLI --dates subset is allowed only for smoke tests and must remain inside the frozen holdout set.",
-  "allocation_equivalence_note": "Because worker counts are integers, Entropy(lambda*) may produce the same allocation as Volume/Equal/Random on some dates. phase5_allocation_equivalence.csv records this explicitly."
+  "allocation_equivalence_note": "Because worker counts are integers, Entropy(lambda*) may produce the same allocation as Volume/Equal/Random on some dates. phase5_allocation_equivalence.csv records this explicitly.",
+  "baseline_allocation_comparison_note": "The baseline DES preserves original Picking_Wave operator assignments and does not fix workers to Phase 3 zones. phase5_allocation_comparison.csv therefore reports a comparison-only dominant-zone projection: each original operator is counted once in the zone containing the largest share of that operator's assigned workload. The CSV also reports distinct operators touching each zone; those touching counts can overlap across zones. Neither view changes the baseline simulation."
 }

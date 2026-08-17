@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from entropy_thesis.simulation.phase5 import (
+    _baseline_zone_projection,
     _evenly_spaced_dates,
     aggregate_method_records,
     holdout_comparison_records,
@@ -13,6 +15,7 @@ from entropy_thesis.simulation.phase5 import (
     paired_comparison_records,
     select_validation_dates,
 )
+from entropy_thesis.simulation.phase3 import AisleZone, PickingListZoneAssignment
 
 
 def test_evenly_spaced_dates_is_deterministic_and_covers_endpoints() -> None:
@@ -69,6 +72,7 @@ def _daily_frame() -> pd.DataFrame:
                     "congestion_delay_ratio": flow / 1000.0,
                     "total_distance_m": flow,
                     "mean_release_delay_seconds": flow,
+                    "mean_spatial_entropy_multiworker": 2.0 / flow,
                     "mean_spatial_entropy_normalized": 1.0 / flow,
                     "worker_allocation_entropy_normalized": 0.5,
                     "demand_worker_l1_gap": 0.1,
@@ -98,7 +102,29 @@ def test_holdout_comparison_records_outputs_phase3_style_means() -> None:
     assert entropy["mean_flow_time_seconds"] == pytest.approx(80.0)
     assert entropy["congestion_conflicts"] == pytest.approx(80.0)
     assert entropy["congestion_delay_ratio"] == pytest.approx(0.08)
+    assert entropy["mean_spatial_entropy_multiworker"] == pytest.approx(
+        (2.0 / 90.0 + 2.0 / 80.0 + 2.0 / 70.0) / 3.0
+    )
     assert volume["mean_flow_time_seconds"] == pytest.approx(95.0)
+
+
+def test_baseline_zone_projection_preserves_worker_total_and_reports_touching() -> None:
+    zones = (
+        AisleZone("Z01", (1.0,), 1.0, 1.0),
+        AisleZone("Z02", (2.0,), 2.0, 2.0),
+    )
+    assignments = (
+        PickingListZoneAssignment(0, "W1", "OP-A", "Z01", 8, 8.0, 1, 8, 8.0),
+        PickingListZoneAssignment(1, "W2", "OP-A", "Z02", 2, 2.0, 1, 2, 2.0),
+        PickingListZoneAssignment(2, "W3", "OP-B", "Z02", 5, 5.0, 1, 5, 5.0),
+    )
+    result = SimpleNamespace(assignments=assignments)
+
+    dominant, touching = _baseline_zone_projection(result, zones, volume_basis="tasks")
+
+    assert dominant == (1, 1)
+    assert sum(dominant) == 2
+    assert touching == (1, 2)
 
 
 def test_paired_comparison_counts_entropy_wins_for_minimize_metric() -> None:

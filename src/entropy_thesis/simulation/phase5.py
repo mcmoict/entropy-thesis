@@ -84,6 +84,7 @@ HOLDOUT_COMPARISON_METRICS: tuple[str, ...] = (
     "mean_release_delay_seconds",
     "mean_flow_time_seconds",
     "makespan_seconds",
+    "mean_spatial_entropy_multiworker",
     "mean_spatial_entropy_normalized",
 )
 
@@ -136,6 +137,7 @@ class Phase5Run:
     entropy_weight: float
     entropy_source: str
     selection_metric: str
+    volume_basis: Literal["tasks", "units"]
     requested_dates: tuple[date, ...]
     results: tuple[Phase5DateResult, ...]
     skipped: tuple[dict[str, object], ...]
@@ -574,6 +576,7 @@ def build_and_run_phase5(
         entropy_weight=spec.entropy_weight,
         entropy_source=f"phase4_recommendation:{spec.source_path}",
         selection_metric=spec.selection_metric,
+        volume_basis=volume_basis,
         requested_dates=tuple(requested),
         results=tuple(results),
         skipped=tuple(skipped),
@@ -666,6 +669,129 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
                     }
                 )
+    return records
+
+
+def _baseline_zone_projection(
+    result: Phase5DateResult,
+    zones: tuple[AisleZone, ...],
+    *,
+    volume_basis: Literal["tasks", "units"],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Project the observed baseline onto Phase 3 zones for comparison only.
+
+    The actual baseline simulation keeps the original operator-to-picking-list
+    assignment and does not fix each operator to one Phase 3 zone.  Two zone
+    views are therefore reported:
+
+    * dominant-zone workers: each original operator is assigned once to the
+      zone containing the largest share of that operator's assigned workload;
+      these counts sum to the observed worker count and are suitable for a
+      side-by-side allocation table.
+    * touching-zone operators: distinct original operators that own at least
+      one picking list whose dominant zone is the zone; an operator may appear
+      in more than one zone, so these counts need not sum to the worker count.
+
+    Neither projection changes the baseline DES behavior.
+    """
+
+    zone_ids = tuple(zone.zone_id for zone in zones)
+    zone_order = {zone_id: index for index, zone_id in enumerate(zone_ids)}
+    operator_workload: defaultdict[str, defaultdict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    touching: dict[str, set[str]] = {zone_id: set() for zone_id in zone_ids}
+
+    for assignment in result.assignments:
+        workload = (
+            float(assignment.pick_tasks)
+            if volume_basis == "tasks"
+            else float(assignment.pick_units)
+        )
+        operator_workload[assignment.original_operator][assignment.zone_id] += workload
+        touching[assignment.zone_id].add(assignment.original_operator)
+
+    dominant_counts = {zone_id: 0 for zone_id in zone_ids}
+    for workloads in operator_workload.values():
+        dominant_zone = max(
+            workloads,
+            key=lambda zone_id: (workloads[zone_id], -zone_order[zone_id]),
+        )
+        dominant_counts[dominant_zone] += 1
+
+    return (
+        tuple(dominant_counts[zone_id] for zone_id in zone_ids),
+        tuple(len(touching[zone_id]) for zone_id in zone_ids),
+    )
+
+
+def phase5_allocation_comparison_records(run: Phase5Run) -> list[dict[str, object]]:
+    """Return a wide per-date/per-zone allocation comparison including baseline.
+
+    Reallocation methods are true fixed zone worker counts.  Baseline is shown
+    as a dominant-zone projection of the original operator assignments so that
+    the observed assignment can be compared without altering the DES baseline.
+    The additional touching-zone count exposes cross-zone baseline activity.
+    """
+
+    records: list[dict[str, object]] = []
+    for result in run.results:
+        counts_by_method = {item.method: item.worker_counts for item in result.methods}
+        baseline_dominant, baseline_touching = _baseline_zone_projection(
+            result,
+            run.zones,
+            volume_basis=run.volume_basis,
+        )
+        total_workload = sum(result.workloads)
+        for zone_index, (zone, workload) in enumerate(
+            zip(run.zones, result.workloads, strict=True)
+        ):
+            records.append(
+                {
+                    "selected_date": result.selected_date.isoformat(),
+                    "zone_id": zone.zone_id,
+                    "workload": workload,
+                    "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
+                    "baseline_dominant_zone_workers": baseline_dominant[zone_index],
+                    "baseline_distinct_operators_touching_zone": baseline_touching[zone_index],
+                    "random_workers": counts_by_method["random"][zone_index],
+                    "equal_workers": counts_by_method["equal"][zone_index],
+                    "volume_proportional_workers": counts_by_method["volume_proportional"][zone_index],
+                    "entropy_based_workers": result.entropy_worker_counts[zone_index],
+                    "entropy_weight": run.entropy_weight,
+                }
+            )
+    return records
+
+
+def holdout_allocation_mean_records(run: Phase5Run) -> list[dict[str, object]]:
+    """Average date-level zone workload shares and worker counts for console use."""
+
+    allocation = pd.DataFrame(phase5_allocation_comparison_records(run))
+    records: list[dict[str, object]] = []
+    for zone in run.zones:
+        subset = allocation[allocation["zone_id"] == zone.zone_id]
+        if subset.empty:
+            continue
+        records.append(
+            {
+                "zone_id": zone.zone_id,
+                "n_days": int(subset["selected_date"].nunique()),
+                "workload_share": float(subset["workload_share"].mean()),
+                "baseline_dominant_zone_workers": float(
+                    subset["baseline_dominant_zone_workers"].mean()
+                ),
+                "baseline_distinct_operators_touching_zone": float(
+                    subset["baseline_distinct_operators_touching_zone"].mean()
+                ),
+                "random_workers": float(subset["random_workers"].mean()),
+                "equal_workers": float(subset["equal_workers"].mean()),
+                "volume_proportional_workers": float(
+                    subset["volume_proportional_workers"].mean()
+                ),
+                "entropy_based_workers": float(subset["entropy_based_workers"].mean()),
+            }
+        )
     return records
 
 
@@ -827,6 +953,9 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
     pd.DataFrame(phase5_allocation_records(run)).to_csv(
         output_dir / "phase5_allocations.csv", index=False
     )
+    pd.DataFrame(phase5_allocation_comparison_records(run)).to_csv(
+        output_dir / "phase5_allocation_comparison.csv", index=False
+    )
     pd.DataFrame(phase5_allocation_equivalence_records(run)).to_csv(
         output_dir / "phase5_allocation_equivalence.csv", index=False
     )
@@ -893,6 +1022,14 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
         "allocation_equivalence_note": (
             "Because worker counts are integers, Entropy(lambda*) may produce the same allocation as "
             "Volume/Equal/Random on some dates. phase5_allocation_equivalence.csv records this explicitly."
+        ),
+        "baseline_allocation_comparison_note": (
+            "The baseline DES preserves original Picking_Wave operator assignments and does not fix workers "
+            "to Phase 3 zones. phase5_allocation_comparison.csv therefore reports a comparison-only "
+            "dominant-zone projection: each original operator is counted once in the zone containing the "
+            "largest share of that operator's assigned workload. The CSV also reports distinct operators "
+            "touching each zone; those touching counts can overlap across zones. Neither view changes the "
+            "baseline simulation."
         ),
     }
     with (output_dir / "phase5_metadata.json").open("w", encoding="utf-8") as file:
@@ -1008,6 +1145,7 @@ def main() -> None:
     primary_methods = method_summary[method_summary["metric"] == run.selection_metric]
     equivalence = phase5_allocation_equivalence_records(run)
     same_as_volume = sum(bool(row["same_as_volume"]) for row in equivalence)
+    allocation_means = holdout_allocation_mean_records(run)
 
     print()
     print("=== Phase 5 | Frozen Holdout Validation ===")
@@ -1024,7 +1162,7 @@ def main() -> None:
     print(f"=== Comparison | Holdout Mean ({len(run.results):,} dates) ===")
     print(
         "Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   "
-        "Mean flow time(s)   Makespan(s)   Mean spatial H"
+        "Mean flow time(s)   Makespan(s)   Mean spatial H (2+ workers)   Mean spatial H"
     )
     for row in comparison:
         print(
@@ -1036,8 +1174,46 @@ def main() -> None:
             f"{float(row['mean_release_delay_seconds']):>21,.2f}   "
             f"{float(row['mean_flow_time_seconds']):>17,.2f}   "
             f"{float(row['makespan_seconds']):>11,.2f}   "
+            f"{float(row['mean_spatial_entropy_multiworker']):>19.4f}   "
             f"{float(row['mean_spatial_entropy_normalized']):>14.4f}"
         )
+    print()
+    print("=== Worker Allocation Rules ===")
+    print(
+        "baseline            : original Picking_Wave operator -> picking-list assignment preserved; "
+        "workers are not fixed to one Phase 3 zone"
+    )
+    print("random              : minimum workers per active zone + seeded random allocation of remaining workers")
+    print("equal               : workers distributed as evenly as possible across active zones")
+    print("volume_proportional : workers allocated in proportion to each date's zone workload")
+    print(
+        f"entropy_based       : entropy-regularized workload allocation with fixed lambda={run.entropy_weight:g}"
+    )
+    print()
+    print(f"=== Worker Allocation | Holdout Mean by Zone ({len(run.results):,} dates) ===")
+    print(
+        "Zone   Workload(%)   Baseline*   Random   Equal   Volume   Entropy   Baseline touch**"
+    )
+    for row in allocation_means:
+        print(
+            f"{str(row['zone_id']):<5} "
+            f"{float(row['workload_share']) * 100:>11.2f}   "
+            f"{float(row['baseline_dominant_zone_workers']):>9.2f}   "
+            f"{float(row['random_workers']):>6.2f}   "
+            f"{float(row['equal_workers']):>5.2f}   "
+            f"{float(row['volume_proportional_workers']):>6.2f}   "
+            f"{float(row['entropy_based_workers']):>7.2f}   "
+            f"{float(row['baseline_distinct_operators_touching_zone']):>16.2f}"
+        )
+    print(
+        "* Baseline: comparison-only dominant-zone projection of original operators; "
+        "the actual baseline DES remains the original operator assignment."
+    )
+    print(
+        "** Baseline touch: mean distinct original operators with at least one list assigned to the zone; "
+        "operators may be counted in multiple zones."
+    )
+    print("Per-date details     : phase5_allocation_comparison.csv")
     print()
     print("=== Primary KPI | Method Statistics ===")
     print("Method                  Mean              Std")
