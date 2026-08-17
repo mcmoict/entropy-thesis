@@ -102,6 +102,23 @@ worker_allocation_entropy_normalized
 demand_worker_l1_gap
 ```
 
+Phase 5 콘솔에는 Phase 3의 `=== Comparison ===` 형식을 그대로 확장한
+**Holdout 평균 비교표**도 출력한다.
+
+```text
+=== Comparison | Holdout Mean (40 dates) ===
+Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   Mean flow time(s)   Makespan(s)   Mean spatial H
+baseline                  ...          ...        ...           ...                    ...                ...           ...              ...
+random                    ...          ...        ...           ...                    ...                ...           ...              ...
+equal                     ...          ...        ...           ...                    ...                ...           ...              ...
+volume_proportional       ...          ...        ...           ...                    ...                ...           ...              ...
+entropy_based             ...          ...        ...           ...                    ...                ...           ...              ...
+```
+
+Phase 3의 표는 한 운영일의 KPI지만, Phase 5의 표는 완료된 Holdout 날짜별 KPI를
+방법별로 산술평균한 값이다. 따라서 `Conflicts` 역시 정수 총계가 아니라
+**Holdout 날짜당 평균 충돌 수**로 소수점이 표시될 수 있다.
+
 ## 6. 통계 검증
 
 운영일을 paired observation으로 두고 Entropy(λ*)와 각 비교 방법을 같은 날짜끼리 비교한다.
@@ -148,6 +165,7 @@ results/phase5/
   phase5_allocations.csv
   phase5_allocation_equivalence.csv
   phase5_method_summary.csv
+  phase5_comparison_summary.csv
   phase5_paired_comparison.csv
   phase5_primary_comparison.csv
   phase5_skipped_dates.csv
@@ -161,6 +179,11 @@ Holdout 날짜 × 방법 단위의 DES 결과이다. 40개 날짜를 모두 완�
 ### phase5_method_summary.csv
 
 방법 × KPI별 전체 Holdout 요약 통계이다.
+
+### phase5_comparison_summary.csv
+
+콘솔의 `Comparison | Holdout Mean` 표와 동일한 Phase 3 스타일의 wide-format 요약이다.
+Baseline / Random / Equal / Volume Proportional / Entropy-based 순서로 Holdout 평균 KPI를 저장한다.
 
 ### phase5_paired_comparison.csv
 

@@ -8,6 +8,7 @@ import pytest
 from entropy_thesis.simulation.phase5 import (
     _evenly_spaced_dates,
     aggregate_method_records,
+    holdout_comparison_records,
     load_phase4_holdout_spec,
     paired_comparison_records,
     select_validation_dates,
@@ -65,6 +66,7 @@ def _daily_frame() -> pd.DataFrame:
                     "makespan_seconds": flow * 10,
                     "congestion_wait_seconds": flow,
                     "congestion_conflicts": flow,
+                    "congestion_delay_ratio": flow / 1000.0,
                     "total_distance_m": flow,
                     "mean_release_delay_seconds": flow,
                     "mean_spatial_entropy_normalized": 1.0 / flow,
@@ -85,6 +87,18 @@ def test_aggregate_method_records_outputs_long_format_statistics() -> None:
     )
     assert item["n_days"] == 3
     assert item["mean"] == pytest.approx(80.0)
+
+
+def test_holdout_comparison_records_outputs_phase3_style_means() -> None:
+    records = holdout_comparison_records(_daily_frame())
+    entropy = next(record for record in records if record["method"] == "entropy_based")
+    volume = next(record for record in records if record["method"] == "volume_proportional")
+
+    assert entropy["n_days"] == 3
+    assert entropy["mean_flow_time_seconds"] == pytest.approx(80.0)
+    assert entropy["congestion_conflicts"] == pytest.approx(80.0)
+    assert entropy["congestion_delay_ratio"] == pytest.approx(0.08)
+    assert volume["mean_flow_time_seconds"] == pytest.approx(95.0)
 
 
 def test_paired_comparison_counts_entropy_wins_for_minimize_metric() -> None:

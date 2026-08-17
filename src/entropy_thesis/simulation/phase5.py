@@ -76,6 +76,17 @@ AGGREGATE_METRICS: tuple[str, ...] = (
     "demand_worker_l1_gap",
 )
 
+HOLDOUT_COMPARISON_METRICS: tuple[str, ...] = (
+    "total_distance_m",
+    "congestion_conflicts",
+    "congestion_wait_seconds",
+    "congestion_delay_ratio",
+    "mean_release_delay_seconds",
+    "mean_flow_time_seconds",
+    "makespan_seconds",
+    "mean_spatial_entropy_normalized",
+)
+
 
 @dataclass(frozen=True)
 class Phase4HoldoutSpec:
@@ -707,6 +718,31 @@ def aggregate_method_records(daily: pd.DataFrame) -> list[dict[str, object]]:
     return records
 
 
+def holdout_comparison_records(daily: pd.DataFrame) -> list[dict[str, object]]:
+    """Return Phase-3-style KPI means across completed Phase 5 holdout dates.
+
+    Phase 3 prints one day's raw method summary.  Phase 5 spans multiple frozen
+    holdout dates, so the corresponding comparison table uses the arithmetic
+    mean of each date-level KPI for every method.
+    """
+
+    records: list[dict[str, object]] = []
+    for method in PHASE5_METHODS:
+        subset = daily[daily["method"] == method]
+        if subset.empty:
+            continue
+
+        record: dict[str, object] = {
+            "method": method,
+            "n_days": int(subset["selected_date"].nunique()),
+        }
+        for metric in HOLDOUT_COMPARISON_METRICS:
+            values = pd.to_numeric(subset[metric], errors="coerce").dropna()
+            record[metric] = float(values.mean()) if not values.empty else float("nan")
+        records.append(record)
+    return records
+
+
 def _paired_wilcoxon(entropy_values: list[float], comparator_values: list[float]) -> tuple[float, float]:
     differences = [left - right for left, right in zip(entropy_values, comparator_values, strict=True)]
     nonzero = [value for value in differences if not math.isclose(value, 0.0, abs_tol=1e-12)]
@@ -796,6 +832,9 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
     )
     pd.DataFrame(aggregate_method_records(daily)).to_csv(
         output_dir / "phase5_method_summary.csv", index=False
+    )
+    pd.DataFrame(holdout_comparison_records(daily)).to_csv(
+        output_dir / "phase5_comparison_summary.csv", index=False
     )
     paired = pd.DataFrame(paired_comparison_records(daily))
     paired.to_csv(output_dir / "phase5_paired_comparison.csv", index=False)
@@ -962,6 +1001,7 @@ def main() -> None:
     progress.complete("Phase 5 processing completed")
 
     daily = pd.DataFrame(phase5_daily_records(run))
+    comparison = holdout_comparison_records(daily)
     method_summary = pd.DataFrame(aggregate_method_records(daily))
     paired = pd.DataFrame(paired_comparison_records(daily))
     primary = paired[paired["metric"] == run.selection_metric]
@@ -980,6 +1020,24 @@ def main() -> None:
     print(f"Primary metric        : {run.selection_metric}")
     print("Lambda recalibration  : no")
     print("Holdout resampling    : no")
+    print()
+    print(f"=== Comparison | Holdout Mean ({len(run.results):,} dates) ===")
+    print(
+        "Method               Distance(m)   Conflicts   Wait(s)   Congestion(%)   Mean release delay(s)   "
+        "Mean flow time(s)   Makespan(s)   Mean spatial H"
+    )
+    for row in comparison:
+        print(
+            f"{str(row['method']):<20} "
+            f"{float(row['total_distance_m']):>11,.2f}   "
+            f"{float(row['congestion_conflicts']):>9,.2f}   "
+            f"{float(row['congestion_wait_seconds']):>7,.2f}   "
+            f"{float(row['congestion_delay_ratio']) * 100:>13.2f}   "
+            f"{float(row['mean_release_delay_seconds']):>21,.2f}   "
+            f"{float(row['mean_flow_time_seconds']):>17,.2f}   "
+            f"{float(row['makespan_seconds']):>11,.2f}   "
+            f"{float(row['mean_spatial_entropy_normalized']):>14.4f}"
+        )
     print()
     print("=== Primary KPI | Method Statistics ===")
     print("Method                  Mean              Std")
