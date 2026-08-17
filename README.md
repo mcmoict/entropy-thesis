@@ -147,7 +147,7 @@ entropy-thesis --config configs/overload.yaml
 엔트로피 민감도 분석은 같은 시나리오에서 `entropy_weight`만 바꿔 별도 출력 디렉터리로
 실행합니다. 설정과 seed가 같으면 결과가 동일합니다.
 
-## 실제 데이터 Phase 1 / Phase 2 / Phase 3 / Phase 4
+## 실제 데이터 Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5
 
 실제 CSV 기반 창고 graph 검증은 다음 명령으로 실행합니다.
 
@@ -175,7 +175,13 @@ python -m entropy_thesis.simulation.phase4 --data-dir data/raw --date 2023-01-05
 
 기본 λ 후보는 `0, 0.25, 0.5, 1, 2, 4, 8`이며, 동일한 정수 작업자 배치가 반복되면 DES는 한 번만 실행합니다. 기본 λ 선택 KPI는 `mean_flow_time_seconds`입니다.
 
-세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`를 참고합니다.
+Phase 5의 다중 날짜 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택한 λ를 고정하고 다른 운영일의 Baseline / Random / Equal / Volume Proportional / Entropy-based 결과를 paired 비교합니다.
+
+```bash
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw --validation-days 12
+```
+
+세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`, `README_PHASE5.md`를 참고합니다.
 
 ## 모델 범위와 한계
 

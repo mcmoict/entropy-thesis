@@ -1,0 +1,5 @@
+comparator,metric,direction,n_days,entropy_mean,comparator_mean,mean_delta_entropy_minus_comparator,mean_improvement_pct,wins,ties,losses,win_rate_excluding_ties,wilcoxon_statistic,wilcoxon_p_value_two_sided,significant_at_0_05
+baseline,mean_flow_time_seconds,minimize,131,369.50126745252015,488.7327976228815,-119.23153017036137,23.980125570279984,123,0,8,0.9389312977099237,190.0,2.2134315317490018e-21,True
+random,mean_flow_time_seconds,minimize,131,369.50126745252015,506.7863713329882,-137.28510388046806,22.882382783082218,122,9,0,1.0,0.0,9.239952282714919e-22,True
+equal,mean_flow_time_seconds,minimize,131,369.50126745252015,443.359796863306,-73.85852941078582,14.378113265996975,108,20,3,0.972972972972973,41.0,1.8143424838812583e-19,True
+volume_proportional,mean_flow_time_seconds,minimize,131,369.50126745252015,369.50126745252015,0.0,0.0,0,131,0,0.0,0.0,1.0,False
