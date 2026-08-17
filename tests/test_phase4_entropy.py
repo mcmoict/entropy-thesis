@@ -132,3 +132,89 @@ def test_selection_maximizes_spatial_entropy() -> None:
         (low, high), metric="mean_spatial_entropy_normalized"
     )
     assert selected.candidate.entropy_weight == 2.0
+
+
+def test_phase4_default_lambda_grid_is_dense() -> None:
+    from entropy_thesis.simulation.phase4 import DEFAULT_ENTROPY_WEIGHTS
+
+    assert DEFAULT_ENTROPY_WEIGHTS == (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0)
+
+
+def test_phase4_chronological_split_reserves_holdout_dates() -> None:
+    from datetime import date
+
+    from entropy_thesis.simulation.phase4 import split_phase4_dates
+
+    values = tuple(date(2023, 1, day) for day in range(1, 11))
+    calibration, holdout = split_phase4_dates(
+        values,
+        calibration_ratio=0.7,
+        split_strategy="chronological",
+    )
+    assert calibration == values[:7]
+    assert holdout == values[7:]
+    assert set(calibration).isdisjoint(holdout)
+
+
+def test_phase4_random_split_is_reproducible_and_date_disjoint() -> None:
+    from datetime import date
+
+    from entropy_thesis.simulation.phase4 import split_phase4_dates
+
+    values = tuple(date(2023, 1, day) for day in range(1, 11))
+    first = split_phase4_dates(values, calibration_ratio=0.7, split_strategy="random", seed=42)
+    second = split_phase4_dates(values, calibration_ratio=0.7, split_strategy="random", seed=42)
+    assert first == second
+    calibration, holdout = first
+    assert len(calibration) == 7
+    assert len(holdout) == 3
+    assert set(calibration).isdisjoint(holdout)
+
+
+def test_phase4_multidate_selection_uses_equal_weight_date_mean() -> None:
+    import pandas as pd
+
+    from entropy_thesis.simulation.phase4 import select_phase4_entropy_weight_from_daily
+
+    daily = pd.DataFrame(
+        [
+            {"selected_date": "2023-01-01", "entropy_weight": 0.0, "mean_flow_time_seconds": 100.0},
+            {"selected_date": "2023-01-02", "entropy_weight": 0.0, "mean_flow_time_seconds": 100.0},
+            {"selected_date": "2023-01-01", "entropy_weight": 0.5, "mean_flow_time_seconds": 80.0},
+            {"selected_date": "2023-01-02", "entropy_weight": 0.5, "mean_flow_time_seconds": 90.0},
+            {"selected_date": "2023-01-01", "entropy_weight": 1.0, "mean_flow_time_seconds": 70.0},
+            {"selected_date": "2023-01-02", "entropy_weight": 1.0, "mean_flow_time_seconds": 110.0},
+        ]
+    )
+    selected = select_phase4_entropy_weight_from_daily(daily)
+    assert selected == 0.5
+
+
+def test_phase4_paired_statistics_count_wins_against_lambda_zero() -> None:
+    import pandas as pd
+
+    from entropy_thesis.simulation.phase4 import paired_phase4_lambda_records
+
+    rows = []
+    for day, zero, candidate in [
+        ("2023-01-01", 100.0, 90.0),
+        ("2023-01-02", 100.0, 80.0),
+        ("2023-01-03", 100.0, 100.0),
+    ]:
+        for weight, flow in [(0.0, zero), (0.5, candidate)]:
+            rows.append(
+                {
+                    "selected_date": day,
+                    "entropy_weight": weight,
+                    "mean_flow_time_seconds": flow,
+                }
+            )
+    result = paired_phase4_lambda_records(
+        pd.DataFrame(rows),
+        metrics=("mean_flow_time_seconds",),
+    )
+    item = next(record for record in result if record["entropy_weight"] == 0.5)
+    assert item["wins"] == 2
+    assert item["ties"] == 1
+    assert item["losses"] == 0
+    assert item["mean_improvement_pct"] == pytest.approx(10.0)

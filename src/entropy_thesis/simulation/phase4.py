@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 import json
 import math
+import random
 from pathlib import Path
 from typing import Iterable, Literal
 
 import pandas as pd
+from scipy.stats import wilcoxon
 
 from ..allocation import allocate_workers
 from ..entropy import normalized_shannon_entropy
@@ -40,7 +42,7 @@ SelectionMetric = Literal[
     "mean_spatial_entropy_normalized",
 ]
 
-DEFAULT_ENTROPY_WEIGHTS: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+DEFAULT_ENTROPY_WEIGHTS: tuple[float, ...] = (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0)
 DEFAULT_SELECTION_METRIC: SelectionMetric = "mean_flow_time_seconds"
 MAXIMIZE_METRICS = {"mean_spatial_entropy_normalized"}
 
@@ -579,12 +581,716 @@ def _parse_entropy_weights(value: str) -> tuple[float, ...]:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+# ---------------------------------------------------------------------------
+# Phase 4A~4E: multi-date calibration / holdout workflow
+# ---------------------------------------------------------------------------
+
+DEFAULT_MIN_LISTS_PER_DATE = 20
+DEFAULT_CALIBRATION_RATIO = 0.70
+DEFAULT_SPLIT_STRATEGY = "chronological"
+PHASE4_COMPARISON_METRICS: tuple[SelectionMetric, ...] = (
+    "mean_flow_time_seconds",
+    "makespan_seconds",
+    "congestion_wait_seconds",
+    "congestion_conflicts",
+    "total_distance_m",
+    "mean_release_delay_seconds",
+    "mean_spatial_entropy_normalized",
+)
+
+
+@dataclass(frozen=True)
+class Phase4DateProfile:
+    selected_date: date
+    picking_lists: int
+    pick_tasks: int
+    picked_units: float
+    observed_workers: int
+    effective_workers: int
+    active_zones: int
+    eligible: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class Phase4CalibrationDateResult:
+    selected_date: date
+    picking_lists: tuple[PickingList, ...]
+    assignments: tuple[PickingListZoneAssignment, ...]
+    workloads: tuple[float, ...]
+    demand_entropy: DemandEntropyMetrics
+    observed_workers: int
+    effective_workers: int
+    results: tuple[Phase4CandidateResult, ...]
+    unique_simulation_count: int
+
+
+@dataclass(frozen=True)
+class Phase4MultiDateRun:
+    dataset: DatasetBundle
+    warehouse: WarehouseGraph
+    audit: Phase1Audit
+    zones: tuple[AisleZone, ...]
+    profiles: tuple[Phase4DateProfile, ...]
+    eligible_dates: tuple[date, ...]
+    calibration_dates: tuple[date, ...]
+    holdout_dates: tuple[date, ...]
+    calibration_results: tuple[Phase4CalibrationDateResult, ...]
+    entropy_weights: tuple[float, ...]
+    selection_metric: SelectionMetric
+    selected_entropy_weight: float
+    split_strategy: str
+    calibration_ratio: float
+
+
+def _phase4_date_map(
+    warehouse: WarehouseGraph,
+    picking_lists: Iterable[PickingList],
+) -> dict[date, list[PickingList]]:
+    grouped: dict[date, list[PickingList]] = {}
+    for picking_list in picking_lists:
+        if picking_list.created_at is None or not picking_list.picks:
+            continue
+        if not all(warehouse.has_location(task.location_id) for task in picking_list.picks):
+            continue
+        grouped.setdefault(picking_list.created_at.date(), []).append(picking_list)
+    for items in grouped.values():
+        items.sort(key=lambda item: (item.created_at, item.wave_number, item.operator))
+    return grouped
+
+
+def extract_phase4_date_profiles(
+    warehouse: WarehouseGraph,
+    picking_lists: Iterable[PickingList],
+    zones: tuple[AisleZone, ...],
+    *,
+    min_lists_per_date: int = DEFAULT_MIN_LISTS_PER_DATE,
+    max_lists: int | None = None,
+    total_workers: int | None = None,
+    volume_basis: Literal["tasks", "units"] = "tasks",
+    minimum_per_active_zone: int = 1,
+) -> tuple[tuple[Phase4DateProfile, ...], dict[date, list[PickingList]]]:
+    """Phase 4A: enumerate every fully-resolvable operating date and eligibility.
+
+    Eligibility is evaluated on exactly the list subset that will enter DES.  This
+    keeps `--max-lists` development runs internally consistent with the reported
+    operator count and active-zone count.
+    """
+
+    if min_lists_per_date <= 0:
+        raise ValueError("min_lists_per_date는 1 이상이어야 합니다.")
+    if max_lists is not None and max_lists <= 0:
+        raise ValueError("max_lists는 1 이상이어야 합니다.")
+
+    grouped = _phase4_date_map(warehouse, picking_lists)
+    profiles: list[Phase4DateProfile] = []
+    selected_by_date: dict[date, list[PickingList]] = {}
+    for selected_date in sorted(grouped):
+        selected = list(grouped[selected_date])
+        if max_lists is not None:
+            selected = selected[:max_lists]
+        selected_by_date[selected_date] = selected
+
+        observed_workers = len({item.operator for item in selected})
+        effective_workers = observed_workers if total_workers is None else total_workers
+        assignments = classify_picking_lists_by_zone(warehouse, selected, zones)
+        workloads = zone_workload(zones, assignments, basis=volume_basis)
+        active_zones = sum(value > 0 for value in workloads)
+        required_workers = active_zones * minimum_per_active_zone
+
+        reason = "eligible"
+        eligible = True
+        if len(selected) < min_lists_per_date:
+            eligible = False
+            reason = "too_few_lists"
+        elif effective_workers <= 0:
+            eligible = False
+            reason = "no_workers"
+        elif active_zones <= 0:
+            eligible = False
+            reason = "no_active_zones"
+        elif effective_workers < required_workers:
+            eligible = False
+            reason = "insufficient_workers_for_active_zones"
+
+        profiles.append(
+            Phase4DateProfile(
+                selected_date=selected_date,
+                picking_lists=len(selected),
+                pick_tasks=sum(len(item.picks) for item in selected),
+                picked_units=sum(
+                    task.quantity_units for item in selected for task in item.picks
+                ),
+                observed_workers=observed_workers,
+                effective_workers=effective_workers,
+                active_zones=active_zones,
+                eligible=eligible,
+                reason=reason,
+            )
+        )
+    return tuple(profiles), selected_by_date
+
+
+def split_phase4_dates(
+    eligible_dates: Iterable[date],
+    *,
+    calibration_ratio: float = DEFAULT_CALIBRATION_RATIO,
+    split_strategy: Literal["chronological", "random"] = DEFAULT_SPLIT_STRATEGY,
+    seed: int = 42,
+) -> tuple[tuple[date, ...], tuple[date, ...]]:
+    """Phase 4B: split *dates*, never picking lists, into calibration/holdout.
+
+    `chronological` uses earlier dates for calibration and later dates for
+    holdout. `random` performs a reproducible date-level split using `seed`.
+    At least one date is reserved for each side.
+    """
+
+    values = tuple(sorted(dict.fromkeys(eligible_dates)))
+    if len(values) < 2:
+        raise ValueError("Calibration/Holdout 분리를 위해 적합 날짜가 최소 2개 필요합니다.")
+    ratio = float(calibration_ratio)
+    if not math.isfinite(ratio) or not (0.0 < ratio < 1.0):
+        raise ValueError("calibration_ratio는 0과 1 사이여야 합니다.")
+    calibration_count = max(1, min(len(values) - 1, int(math.floor(len(values) * ratio))))
+
+    if split_strategy == "chronological":
+        calibration = values[:calibration_count]
+        holdout = values[calibration_count:]
+    elif split_strategy == "random":
+        shuffled = list(values)
+        random.Random(seed).shuffle(shuffled)
+        calibration_set = set(shuffled[:calibration_count])
+        calibration = tuple(value for value in values if value in calibration_set)
+        holdout = tuple(value for value in values if value not in calibration_set)
+    else:
+        raise ValueError(f"지원하지 않는 split_strategy입니다: {split_strategy}")
+    return tuple(calibration), tuple(holdout)
+
+
+def _run_phase4_calibration_date(
+    warehouse: WarehouseGraph,
+    zones: tuple[AisleZone, ...],
+    selected_date: date,
+    selected_lists: list[PickingList],
+    *,
+    total_workers: int | None,
+    volume_basis: Literal["tasks", "units"],
+    minimum_per_active_zone: int,
+    entropy_weights: tuple[float, ...],
+    seed: int,
+    walking_speed_mps: float,
+    pick_seconds_per_unit: float,
+    edge_capacity: int,
+    pick_node_capacity: int,
+    sample_seconds: float,
+    return_to_io: bool,
+    progress: ConsoleProgress | None,
+    date_index: int,
+    date_count: int,
+) -> Phase4CalibrationDateResult:
+    assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
+    workloads = zone_workload(zones, assignments, basis=volume_basis)
+    demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
+    observed_workers = len({item.operator for item in selected_lists})
+    effective_workers = observed_workers if total_workers is None else total_workers
+
+    candidates = build_entropy_candidates(
+        total_workers=effective_workers,
+        workloads=workloads,
+        entropy_weights=entropy_weights,
+        minimum_per_active_zone=minimum_per_active_zone,
+    )
+    unique_candidates: dict[str, EntropyAllocationCandidate] = {}
+    for candidate in candidates:
+        unique_candidates.setdefault(candidate.allocation_id, candidate)
+    unique_list = list(unique_candidates.values())
+
+    simulations: dict[str, Phase3MethodResult] = {}
+    date_base = 0.12 + 0.78 * (date_index / max(1, date_count))
+    date_span = 0.78 / max(1, date_count)
+    for run_index, candidate in enumerate(unique_list):
+        run_base = date_base + date_span * (run_index / max(1, len(unique_list)))
+        run_span = date_span / max(1, len(unique_list))
+        report_every = max(1, len(selected_lists) // 10)
+
+        def simulation_progress(
+            completed: int,
+            total: int,
+            execution,
+            *,
+            _base=run_base,
+            _span=run_span,
+            _candidate=candidate,
+        ) -> None:
+            if progress is None:
+                return
+            if completed != 1 and completed != total and completed % report_every != 0:
+                return
+            progress.report(
+                _base + _span * (completed / total),
+                (
+                    f"Calibration {selected_date.isoformat()} | "
+                    f"λ={_candidate.entropy_weight:g}: {completed:,}/{total:,} lists"
+                ),
+                current=f"allocation={_candidate.allocation_id}, zone={execution.assigned_zone}",
+            )
+
+        if progress is not None:
+            progress.report(
+                run_base,
+                f"Starting {selected_date.isoformat()} | λ={candidate.entropy_weight:g}",
+                current=(
+                    f"{candidate.allocation_id}: "
+                    + ", ".join(
+                        f"{zone.zone_id}={count}"
+                        for zone, count in zip(zones, candidate.worker_counts, strict=True)
+                    )
+                ),
+            )
+        simulations[candidate.allocation_id] = run_phase3_method(
+            warehouse,
+            selected_lists,
+            zones,
+            assignments,
+            method=f"entropy_lambda_{candidate.entropy_weight:g}",
+            worker_counts=candidate.worker_counts,
+            selected_date=selected_date,
+            demand_entropy=demand_entropy,
+            seed=seed,
+            walking_speed_mps=walking_speed_mps,
+            pick_seconds_per_unit=pick_seconds_per_unit,
+            edge_capacity=edge_capacity,
+            pick_node_capacity=pick_node_capacity,
+            sample_seconds=sample_seconds,
+            return_to_io=return_to_io,
+            volume_basis=volume_basis,
+            progress_callback=simulation_progress,
+        )
+
+    results = tuple(
+        Phase4CandidateResult(candidate, simulations[candidate.allocation_id])
+        for candidate in candidates
+    )
+    return Phase4CalibrationDateResult(
+        selected_date=selected_date,
+        picking_lists=tuple(selected_lists),
+        assignments=assignments,
+        workloads=workloads,
+        demand_entropy=demand_entropy,
+        observed_workers=observed_workers,
+        effective_workers=effective_workers,
+        results=results,
+        unique_simulation_count=len(unique_list),
+    )
+
+
+def phase4_daily_records(run: Phase4MultiDateRun) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for date_result in run.calibration_results:
+        for item in date_result.results:
+            record: dict[str, object] = {
+                "selected_date": date_result.selected_date.isoformat(),
+                "entropy_weight": item.candidate.entropy_weight,
+                "allocation_id": item.candidate.allocation_id,
+                "worker_counts": "|".join(str(v) for v in item.candidate.worker_counts),
+                "reused_allocation": item.candidate.reused_allocation,
+                "observed_workers": date_result.observed_workers,
+                "effective_workers": date_result.effective_workers,
+            }
+            summary = asdict(item.simulation.summary)
+            summary.pop("method", None)
+            summary.pop("selected_date", None)
+            record.update(summary)
+            records.append(record)
+    return records
+
+
+def phase4_allocation_records(run: Phase4MultiDateRun) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for date_result in run.calibration_results:
+        total_workload = sum(date_result.workloads)
+        for item in date_result.results:
+            total_workers = sum(item.candidate.worker_counts)
+            for zone, workload, workers in zip(
+                run.zones,
+                date_result.workloads,
+                item.candidate.worker_counts,
+                strict=True,
+            ):
+                records.append(
+                    {
+                        "selected_date": date_result.selected_date.isoformat(),
+                        "entropy_weight": item.candidate.entropy_weight,
+                        "allocation_id": item.candidate.allocation_id,
+                        "zone_id": zone.zone_id,
+                        "workload": workload,
+                        "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
+                        "workers": workers,
+                        "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
+                    }
+                )
+    return records
+
+
+def aggregate_phase4_lambda_records(
+    daily: pd.DataFrame,
+    *,
+    metrics: Iterable[SelectionMetric] = PHASE4_COMPARISON_METRICS,
+) -> list[dict[str, object]]:
+    """Phase 4D descriptive statistics; every operating date has equal weight."""
+
+    records: list[dict[str, object]] = []
+    for entropy_weight, frame in daily.groupby("entropy_weight", sort=True):
+        for metric in metrics:
+            values = frame[str(metric)].astype(float)
+            records.append(
+                {
+                    "entropy_weight": float(entropy_weight),
+                    "metric": str(metric),
+                    "direction": "maximize" if metric in MAXIMIZE_METRICS else "minimize",
+                    "n_dates": int(values.size),
+                    "mean": float(values.mean()),
+                    "std": float(values.std(ddof=1)) if values.size > 1 else 0.0,
+                    "median": float(values.median()),
+                    "min": float(values.min()),
+                    "max": float(values.max()),
+                }
+            )
+    return records
+
+
+def _paired_wilcoxon_pvalue(differences: pd.Series) -> float:
+    values = differences.astype(float)
+    if values.empty or bool((values.abs() <= 1e-12).all()):
+        return 1.0
+    try:
+        return float(wilcoxon(values, zero_method="wilcox", alternative="two-sided").pvalue)
+    except ValueError:
+        return 1.0
+
+
+def paired_phase4_lambda_records(
+    daily: pd.DataFrame,
+    *,
+    reference_weight: float = 0.0,
+    metrics: Iterable[SelectionMetric] = PHASE4_COMPARISON_METRICS,
+) -> list[dict[str, object]]:
+    """Phase 4D paired date-level comparisons against a reference lambda.
+
+    The default reference is λ=0, which is exactly Volume Proportional before
+    integer-allocation duplicate reuse.  Wilcoxon uses paired daily KPI values.
+    """
+
+    if not math.isclose(float(reference_weight), 0.0) and reference_weight not in set(
+        daily["entropy_weight"].astype(float)
+    ):
+        raise ValueError("reference entropy weight가 daily 결과에 없습니다.")
+
+    weights = tuple(sorted(float(v) for v in daily["entropy_weight"].unique()))
+    if not any(math.isclose(value, reference_weight) for value in weights):
+        raise ValueError("reference entropy weight가 daily 결과에 없습니다.")
+
+    records: list[dict[str, object]] = []
+    for metric in metrics:
+        pivot = daily.pivot(index="selected_date", columns="entropy_weight", values=str(metric))
+        reference_column = min(pivot.columns, key=lambda value: abs(float(value) - reference_weight))
+        reference = pivot[reference_column].astype(float)
+        for weight in weights:
+            candidate_column = min(pivot.columns, key=lambda value: abs(float(value) - weight))
+            candidate = pivot[candidate_column].astype(float)
+            paired = pd.concat([reference.rename("reference"), candidate.rename("candidate")], axis=1).dropna()
+            ref_values = paired["reference"]
+            cand_values = paired["candidate"]
+            differences = cand_values - ref_values
+            maximize = metric in MAXIMIZE_METRICS
+            tolerance = 1e-12
+            if maximize:
+                wins = int((differences > tolerance).sum())
+                losses = int((differences < -tolerance).sum())
+                improvement = (cand_values - ref_values) / ref_values.abs().replace(0.0, float("nan")) * 100.0
+            else:
+                wins = int((differences < -tolerance).sum())
+                losses = int((differences > tolerance).sum())
+                improvement = (ref_values - cand_values) / ref_values.abs().replace(0.0, float("nan")) * 100.0
+            ties = int(len(paired) - wins - losses)
+            records.append(
+                {
+                    "reference_entropy_weight": float(reference_weight),
+                    "entropy_weight": weight,
+                    "metric": str(metric),
+                    "direction": "maximize" if maximize else "minimize",
+                    "n_dates": int(len(paired)),
+                    "reference_mean": float(ref_values.mean()) if len(paired) else float("nan"),
+                    "candidate_mean": float(cand_values.mean()) if len(paired) else float("nan"),
+                    "mean_difference_candidate_minus_reference": float(differences.mean()) if len(paired) else float("nan"),
+                    "mean_improvement_pct": float(improvement.mean(skipna=True)) if len(paired) else float("nan"),
+                    "wins": wins,
+                    "ties": ties,
+                    "losses": losses,
+                    "wilcoxon_p_value": _paired_wilcoxon_pvalue(differences),
+                }
+            )
+    return records
+
+
+def select_phase4_entropy_weight_from_daily(
+    daily: pd.DataFrame,
+    *,
+    metric: SelectionMetric = DEFAULT_SELECTION_METRIC,
+) -> float:
+    """Phase 4E: select λ* by the equal-weight mean across calibration dates."""
+
+    if daily.empty:
+        raise ValueError("Phase 4 daily result가 비어 있습니다.")
+    grouped = daily.groupby("entropy_weight", sort=True)[str(metric)].mean()
+    if metric in MAXIMIZE_METRICS:
+        best_value = float(grouped.max())
+        candidates = [float(weight) for weight, value in grouped.items() if math.isclose(float(value), best_value, rel_tol=1e-12, abs_tol=1e-12)]
+    else:
+        best_value = float(grouped.min())
+        candidates = [float(weight) for weight, value in grouped.items() if math.isclose(float(value), best_value, rel_tol=1e-12, abs_tol=1e-12)]
+    return min(candidates)
+
+
+def build_and_run_phase4_multidate(
+    data_dir: str | Path,
+    *,
+    min_lists_per_date: int = DEFAULT_MIN_LISTS_PER_DATE,
+    calibration_ratio: float = DEFAULT_CALIBRATION_RATIO,
+    split_strategy: Literal["chronological", "random"] = DEFAULT_SPLIT_STRATEGY,
+    max_lists: int | None = None,
+    number_of_zones: int = 4,
+    total_workers: int | None = None,
+    volume_basis: Literal["tasks", "units"] = "tasks",
+    minimum_per_active_zone: int = 1,
+    entropy_weights: Iterable[float] = DEFAULT_ENTROPY_WEIGHTS,
+    selection_metric: SelectionMetric = DEFAULT_SELECTION_METRIC,
+    seed: int = 42,
+    walking_speed_mps: float = 1.2,
+    pick_seconds_per_unit: float = 3.0,
+    edge_capacity: int = 1,
+    pick_node_capacity: int = 1,
+    sample_seconds: float = 5.0,
+    return_to_io: bool = True,
+    progress: ConsoleProgress | None = None,
+) -> Phase4MultiDateRun:
+    """Execute Phase 4A~4E while leaving holdout dates completely unsimulated."""
+
+    weights = _validate_entropy_weights(entropy_weights)
+    if not any(math.isclose(value, 0.0) for value in weights):
+        raise ValueError("다중 날짜 Phase 4 통계 비교를 위해 entropy_weights에 λ=0이 필요합니다.")
+
+    if progress is not None:
+        progress.report(0.02, "Phase 4A | Loading input data")
+    dataset = load_dataset(data_dir)
+    if progress is not None:
+        progress.report(0.06, "Phase 4A | Building deterministic warehouse graph")
+    warehouse = WarehouseGraph.build(
+        dataset.storage_locations,
+        dataset.support_points,
+        deterministic_order=True,
+    )
+    audit = audit_picking_locations(warehouse, dataset.picking_lists)
+    if progress is not None:
+        progress.report(0.09, "Phase 4A | Building physical aisle zones")
+    zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
+    profiles, selected_by_date = extract_phase4_date_profiles(
+        warehouse,
+        dataset.picking_lists,
+        zones,
+        min_lists_per_date=min_lists_per_date,
+        max_lists=max_lists,
+        total_workers=total_workers,
+        volume_basis=volume_basis,
+        minimum_per_active_zone=minimum_per_active_zone,
+    )
+    eligible_dates = tuple(profile.selected_date for profile in profiles if profile.eligible)
+    if progress is not None:
+        progress.report(
+            0.10,
+            "Phase 4B | Splitting calibration / holdout dates",
+            current=f"eligible={len(eligible_dates):,}",
+        )
+    calibration_dates, holdout_dates = split_phase4_dates(
+        eligible_dates,
+        calibration_ratio=calibration_ratio,
+        split_strategy=split_strategy,
+        seed=seed,
+    )
+
+    calibration_results: list[Phase4CalibrationDateResult] = []
+    for date_index, selected_date in enumerate(calibration_dates):
+        calibration_results.append(
+            _run_phase4_calibration_date(
+                warehouse,
+                zones,
+                selected_date,
+                selected_by_date[selected_date],
+                total_workers=total_workers,
+                volume_basis=volume_basis,
+                minimum_per_active_zone=minimum_per_active_zone,
+                entropy_weights=weights,
+                seed=seed,
+                walking_speed_mps=walking_speed_mps,
+                pick_seconds_per_unit=pick_seconds_per_unit,
+                edge_capacity=edge_capacity,
+                pick_node_capacity=pick_node_capacity,
+                sample_seconds=sample_seconds,
+                return_to_io=return_to_io,
+                progress=progress,
+                date_index=date_index,
+                date_count=len(calibration_dates),
+            )
+        )
+
+    provisional = Phase4MultiDateRun(
+        dataset=dataset,
+        warehouse=warehouse,
+        audit=audit,
+        zones=zones,
+        profiles=profiles,
+        eligible_dates=eligible_dates,
+        calibration_dates=calibration_dates,
+        holdout_dates=holdout_dates,
+        calibration_results=tuple(calibration_results),
+        entropy_weights=weights,
+        selection_metric=selection_metric,
+        selected_entropy_weight=0.0,
+        split_strategy=split_strategy,
+        calibration_ratio=float(calibration_ratio),
+    )
+    daily = pd.DataFrame(phase4_daily_records(provisional))
+    selected_weight = select_phase4_entropy_weight_from_daily(daily, metric=selection_metric)
+    return replace(provisional, selected_entropy_weight=selected_weight)
+
+
+def _date_profile_records(run: Phase4MultiDateRun) -> list[dict[str, object]]:
+    calibration_set = set(run.calibration_dates)
+    holdout_set = set(run.holdout_dates)
+    records: list[dict[str, object]] = []
+    for profile in run.profiles:
+        if profile.selected_date in calibration_set:
+            split = "calibration"
+        elif profile.selected_date in holdout_set:
+            split = "holdout"
+        else:
+            split = "ineligible"
+        record = asdict(profile)
+        record["selected_date"] = profile.selected_date.isoformat()
+        record["split"] = split
+        records.append(record)
+    return records
+
+
+def write_phase4_multidate_results(
+    output_dir: str | Path,
+    run: Phase4MultiDateRun,
+    *,
+    parameters: dict[str, object],
+) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    daily = pd.DataFrame(phase4_daily_records(run))
+    aggregate = pd.DataFrame(
+        aggregate_phase4_lambda_records(daily, metrics=PHASE4_COMPARISON_METRICS)
+    )
+    paired = pd.DataFrame(
+        paired_phase4_lambda_records(
+            daily,
+            reference_weight=0.0,
+            metrics=PHASE4_COMPARISON_METRICS,
+        )
+    )
+    date_profiles = pd.DataFrame(_date_profile_records(run))
+    allocations = pd.DataFrame(phase4_allocation_records(run))
+
+    date_profiles.to_csv(output_dir / "phase4_dates.csv", index=False)
+    daily.to_csv(output_dir / "phase4_daily_results.csv", index=False)
+    aggregate.to_csv(output_dir / "phase4_lambda_statistics.csv", index=False)
+    paired.to_csv(output_dir / "phase4_pairwise_vs_lambda0.csv", index=False)
+    allocations.to_csv(output_dir / "phase4_allocations.csv", index=False)
+
+    primary = aggregate[aggregate["metric"] == run.selection_metric].copy()
+    selected_stats = primary[
+        primary["entropy_weight"].astype(float).map(
+            lambda value: math.isclose(value, run.selected_entropy_weight)
+        )
+    ].iloc[0]
+    selected_pair = paired[
+        (paired["metric"] == run.selection_metric)
+        & paired["entropy_weight"].astype(float).map(
+            lambda value: math.isclose(value, run.selected_entropy_weight)
+        )
+    ].iloc[0]
+    recommendation = {
+        "phase": "4E",
+        "selection_metric": run.selection_metric,
+        "direction": "maximize" if run.selection_metric in MAXIMIZE_METRICS else "minimize",
+        "entropy_weight": run.selected_entropy_weight,
+        "metric_mean": float(selected_stats["mean"]),
+        "metric_median": float(selected_stats["median"]),
+        "n_calibration_dates": int(selected_stats["n_dates"]),
+        "reference_entropy_weight": 0.0,
+        "mean_improvement_vs_lambda0_pct": float(selected_pair["mean_improvement_pct"]),
+        "wins_vs_lambda0": int(selected_pair["wins"]),
+        "ties_vs_lambda0": int(selected_pair["ties"]),
+        "losses_vs_lambda0": int(selected_pair["losses"]),
+        "wilcoxon_p_value_vs_lambda0": float(selected_pair["wilcoxon_p_value"]),
+        "calibration_dates": [value.isoformat() for value in run.calibration_dates],
+        "holdout_dates": [value.isoformat() for value in run.holdout_dates],
+        "selection_rule": (
+            "Calibration 날짜를 동일 가중치로 두고 primary KPI의 날짜 평균이 최적인 λ를 선택한다. "
+            "정확한 동률이면 더 작은 λ를 선택한다. Wilcoxon 검정은 λ=0 대비 통계적 비교용이며 "
+            "λ* 선택 자체의 유의성 필터로 사용하지 않는다."
+        ),
+    }
+    with (output_dir / "phase4_recommendation.json").open("w", encoding="utf-8") as file:
+        json.dump(recommendation, file, ensure_ascii=False, indent=2)
+
+    metadata = {
+        "phase": 4,
+        "workflow": "4A_full_dates -> 4B_split -> 4C_calibration_DES -> 4D_statistics -> 4E_lambda_star",
+        "input": {
+            "storage_locations": len(run.dataset.storage_locations),
+            "support_points": len(run.dataset.support_points),
+            "picking_lists_total": len(run.dataset.picking_lists),
+            "fully_resolvable_lists_total": run.audit.fully_resolvable_lists,
+            "operating_dates_found": len(run.profiles),
+            "eligible_dates": len(run.eligible_dates),
+            "calibration_dates": len(run.calibration_dates),
+            "holdout_dates": len(run.holdout_dates),
+        },
+        "parameters": parameters,
+        "calibration_dates": [value.isoformat() for value in run.calibration_dates],
+        "holdout_dates": [value.isoformat() for value in run.holdout_dates],
+        "selected": recommendation,
+        "definitions": {
+            "phase4A": "timestamp가 있고 모든 picking location이 warehouse graph에서 resolve되며 최소 list/worker 조건을 만족하는 날짜를 적합 날짜로 정의한다.",
+            "phase4B": "날짜 단위로 Calibration/Holdout을 분리하며 Holdout 날짜는 Phase 4C DES에 사용하지 않는다.",
+            "phase4C": "Calibration 각 날짜에서 모든 λ 후보를 평가한다. 같은 날짜에서 동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다.",
+            "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
+            "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
+            "lambda_zero": "λ=0은 Volume Proportional Allocation과 동일하다.",
+            "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다.",
+        },
+    }
+    with (output_dir / "phase4_metadata.json").open("w", encoding="utf-8") as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2, default=str)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Entropy Thesis - Phase 4 entropy-based worker allocation tuning"
+        description="Entropy Thesis - Phase 4A~4E multi-date entropy calibration"
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
-    parser.add_argument("--date", dest="target_date", type=_parse_date, default=None)
+    parser.add_argument("--min-lists", type=int, default=DEFAULT_MIN_LISTS_PER_DATE)
+    parser.add_argument("--calibration-ratio", type=float, default=DEFAULT_CALIBRATION_RATIO)
+    parser.add_argument(
+        "--split-strategy",
+        choices=("chronological", "random"),
+        default=DEFAULT_SPLIT_STRATEGY,
+    )
     parser.add_argument("--max-lists", type=int, default=None)
     parser.add_argument("--zones", type=int, default=4)
     parser.add_argument("--workers", type=int, default=None)
@@ -594,19 +1300,11 @@ def main() -> None:
         "--entropy-weights",
         type=_parse_entropy_weights,
         default=DEFAULT_ENTROPY_WEIGHTS,
-        help="comma-separated lambda values, e.g. 0,0.25,0.5,1,2,4,8",
+        help="comma-separated lambda values; default=0,0.05,0.1,0.25,0.5,0.75,1,2,4,8",
     )
     parser.add_argument(
         "--selection-metric",
-        choices=(
-            "mean_flow_time_seconds",
-            "makespan_seconds",
-            "congestion_wait_seconds",
-            "congestion_conflicts",
-            "total_distance_m",
-            "mean_release_delay_seconds",
-            "mean_spatial_entropy_normalized",
-        ),
+        choices=tuple(PHASE4_COMPARISON_METRICS),
         default=DEFAULT_SELECTION_METRIC,
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -620,22 +1318,12 @@ def main() -> None:
     args = parser.parse_args()
 
     progress = ConsoleProgress()
-    progress.start("Phase 4 entropy-based allocation tuning")
-    (
-        dataset,
-        warehouse,
-        audit,
-        selected_date,
-        selected_lists,
-        zones,
-        assignments,
-        demand_entropy,
-        results,
-        selected,
-        origin,
-    ) = build_and_run_phase4(
+    progress.start("Phase 4A~4E multi-date entropy calibration")
+    run = build_and_run_phase4_multidate(
         args.data_dir,
-        target_date=args.target_date,
+        min_lists_per_date=args.min_lists,
+        calibration_ratio=args.calibration_ratio,
+        split_strategy=args.split_strategy,
         max_lists=args.max_lists,
         number_of_zones=args.zones,
         total_workers=args.workers,
@@ -653,138 +1341,68 @@ def main() -> None:
         progress=progress,
     )
 
-    workloads = zone_workload(zones, assignments, basis=args.volume_basis)
-    unique_allocations = {item.candidate.allocation_id for item in results}
-    metadata = {
-        "phase": 4,
-        "selected_date": selected_date.isoformat(),
-        "origin_timestamp": origin.isoformat(),
-        "input": {
-            "storage_locations": len(dataset.storage_locations),
-            "support_points": len(dataset.support_points),
-            "picking_lists_total": len(dataset.picking_lists),
-            "fully_resolvable_lists_total": audit.fully_resolvable_lists,
-            "selected_lists": len(selected_lists),
-            "observed_operators": len({p.operator for p in selected_lists}),
-        },
-        "parameters": {
-            "zones": args.zones,
-            "workers": args.workers,
-            "effective_workers": sum(results[0].candidate.worker_counts),
-            "volume_basis": args.volume_basis,
-            "minimum_per_active_zone": args.minimum_per_active_zone,
-            "entropy_weights": list(args.entropy_weights),
-            "selection_metric": args.selection_metric,
-            "seed": args.seed,
-            "walking_speed_mps": args.speed,
-            "pick_seconds_per_unit": args.pick_seconds,
-            "edge_capacity": args.edge_capacity,
-            "pick_node_capacity": args.pick_node_capacity,
-            "sample_seconds": args.sample_seconds,
-            "return_to_io": not args.no_return_to_io,
-            "max_lists": args.max_lists,
-        },
-        "candidate_count": len(results),
-        "unique_simulation_count": len(unique_allocations),
-        "zones": [
-            {
-                "zone_id": zone.zone_id,
-                "aisle_y_values_m": list(zone.aisle_y_values),
-                "y_min_m": zone.y_min_m,
-                "y_max_m": zone.y_max_m,
-                "allocation_workload": workload,
-            }
-            for zone, workload in zip(zones, workloads, strict=True)
-        ],
-        "definitions": {
-            "entropy_objective": "min KL(p || d) - lambda * H(p)",
-            "closed_form": "p_i proportional to d_i ** (1 / (1 + lambda))",
-            "lambda_zero": (
-                "lambda=0은 Phase 3 Volume Proportional Allocation과 동일한 연속 비율을 만들며 "
-                "같은 minimum/water-filling/largest-remainder 규칙으로 정수화한다."
-            ),
-            "lambda_effect": (
-                "lambda가 커질수록 양의 수요가 있는 zone의 worker share가 균등 분포 쪽으로 이동한다."
-            ),
-            "duplicate_allocation_cache": (
-                "서로 다른 lambda가 동일한 정수 worker allocation을 만들면 DES 입력이 동일하므로 "
-                "한 번만 시뮬레이션하고 결과를 해당 lambda 후보들이 공유한다."
-            ),
-            "selection_rule": (
-                "--selection-metric으로 지정한 단일 KPI를 기준으로 lambda를 선택한다. "
-                "비용/시간 지표는 최소화하고 mean_spatial_entropy_normalized는 최대화한다. "
-                "정확한 동률이면 더 작은 lambda를 선택한다."
-            ),
-            "default_selection_metric": (
-                "mean_flow_time_seconds: 각 picking list의 release부터 completion까지 flow time 평균"
-            ),
-            "phase4_role": (
-                "한 calibration date에서 entropy lambda를 탐색한다. 여러 날짜에 대한 일반화 검증은 Phase 5에서 수행한다."
-            ),
-        },
-        "selected": {
-            "entropy_weight": selected.candidate.entropy_weight,
-            "allocation_id": selected.candidate.allocation_id,
-            "worker_counts": list(selected.candidate.worker_counts),
-            "selection_metric": args.selection_metric,
-            "selection_metric_value": _selection_value(selected, args.selection_metric),
-        },
-        "demand_entropy": asdict(demand_entropy),
+    parameters = {
+        "min_lists_per_date": args.min_lists,
+        "calibration_ratio": args.calibration_ratio,
+        "split_strategy": args.split_strategy,
+        "max_lists": args.max_lists,
+        "zones": args.zones,
+        "workers": args.workers,
+        "volume_basis": args.volume_basis,
+        "minimum_per_active_zone": args.minimum_per_active_zone,
+        "entropy_weights": list(args.entropy_weights),
+        "selection_metric": args.selection_metric,
+        "seed": args.seed,
+        "walking_speed_mps": args.speed,
+        "pick_seconds_per_unit": args.pick_seconds,
+        "edge_capacity": args.edge_capacity,
+        "pick_node_capacity": args.pick_node_capacity,
+        "sample_seconds": args.sample_seconds,
+        "return_to_io": not args.no_return_to_io,
     }
+    progress.report(0.94, "Phase 4D/4E | Writing statistics and recommendation")
+    write_phase4_multidate_results(args.output_dir, run, parameters=parameters)
+    progress.complete("Phase 4A~4E processing completed")
 
-    progress.report(0.94, "Writing Phase 4 result files", current=str(args.output_dir))
-    write_phase4_results(
-        args.output_dir,
-        zones=zones,
-        workloads=workloads,
-        results=results,
-        selected=selected,
-        origin=origin,
-        metadata=metadata,
-    )
-    progress.complete("Phase 4 processing completed")
+    daily = pd.DataFrame(phase4_daily_records(run))
+    statistics = pd.DataFrame(aggregate_phase4_lambda_records(daily))
+    primary = statistics[statistics["metric"] == run.selection_metric].sort_values("entropy_weight")
+    paired = pd.DataFrame(paired_phase4_lambda_records(daily))
+    primary_paired = paired[paired["metric"] == run.selection_metric].sort_values("entropy_weight")
 
     print()
-    print("=== Phase 4 Entropy Allocation Tuning ===")
-    print(f"Selected date        : {selected_date.isoformat()}")
-    print(f"Picking lists        : {len(selected_lists):,}")
-    print(f"Observed operators   : {len({p.operator for p in selected_lists}):,}")
-    print(f"Effective workers    : {sum(results[0].candidate.worker_counts):,}")
-    print(f"Aisle zones          : {len(zones):,}")
-    print(f"Lambda candidates    : {len(results):,}")
-    print(f"Unique DES runs      : {len(unique_allocations):,}")
-    print(f"Selection metric     : {args.selection_metric}")
+    print("=== Phase 4A | Eligible Operating Dates ===")
+    print(f"Operating dates found : {len(run.profiles):,}")
+    print(f"Eligible dates        : {len(run.eligible_dates):,}")
     print()
-    print("=== Candidate Comparison ===")
-    print(
-        "Lambda   Allocation   Workers       Alloc H   L1 gap   Mean flow(s)   "
-        "Makespan(s)   Wait(s)   Conflicts   Spatial H"
-    )
-    for item in results:
-        summary = item.simulation.summary
-        marker = "*" if item.candidate == selected.candidate else " "
-        workers_text = "/".join(str(v) for v in item.candidate.worker_counts)
+    print("=== Phase 4B | Calibration / Holdout Split ===")
+    print(f"Split strategy        : {run.split_strategy}")
+    print(f"Calibration ratio     : {run.calibration_ratio:.0%}")
+    print(f"Calibration dates     : {len(run.calibration_dates):,} ({run.calibration_dates[0]} .. {run.calibration_dates[-1]})")
+    print(f"Holdout dates         : {len(run.holdout_dates):,} ({run.holdout_dates[0]} .. {run.holdout_dates[-1]})")
+    print()
+    print("=== Phase 4C/4D | Lambda Calibration ===")
+    print(f"Lambda candidates     : {', '.join(f'{v:g}' for v in run.entropy_weights)}")
+    print(f"Selection metric      : {run.selection_metric}")
+    print("Lambda   Mean              Std               W/T/L vs λ=0    p-value")
+    for _, stat in primary.iterrows():
+        weight = float(stat["entropy_weight"])
+        pair = primary_paired[primary_paired["entropy_weight"].astype(float).map(lambda v: math.isclose(v, weight))].iloc[0]
+        marker = "*" if math.isclose(weight, run.selected_entropy_weight) else " "
         print(
-            f"{marker}{item.candidate.entropy_weight:<7g} "
-            f"{item.candidate.allocation_id:<11} "
-            f"{workers_text:<13} "
-            f"{summary.worker_allocation_entropy_normalized:>7.4f}   "
-            f"{summary.demand_worker_l1_gap:>6.4f}   "
-            f"{summary.mean_flow_time_seconds:>12,.2f}   "
-            f"{summary.makespan_seconds:>11,.2f}   "
-            f"{summary.congestion_wait_seconds:>7,.2f}   "
-            f"{summary.congestion_conflicts:>9,}   "
-            f"{summary.mean_spatial_entropy_normalized:>9.4f}"
+            f"{marker}{weight:<7g} "
+            f"{float(stat['mean']):>16,.4f} "
+            f"{float(stat['std']):>16,.4f}   "
+            f"{int(pair['wins'])}/{int(pair['ties'])}/{int(pair['losses'])}"
+            f"           {float(pair['wilcoxon_p_value']):.6g}"
         )
     print()
+    print("=== Phase 4E | Selected Lambda ===")
+    print(f"Selected λ*           : {run.selected_entropy_weight:g}")
+    print(f"Holdout untouched     : yes ({len(run.holdout_dates):,} dates)")
+    print(f"Results               : {args.output_dir}")
     print(
-        f"Selected lambda      : {selected.candidate.entropy_weight:g} "
-        f"({selected.candidate.allocation_id})"
-    )
-    print(f"Selected workers     : {'/'.join(str(v) for v in selected.candidate.worker_counts)}")
-    print(f"Results              : {args.output_dir}")
-    print(
-        f"Total execution time : {format_duration(progress.elapsed_seconds)} "
+        f"Total execution time  : {format_duration(progress.elapsed_seconds)} "
         f"({progress.elapsed_seconds:,.2f} s)"
     )
 
