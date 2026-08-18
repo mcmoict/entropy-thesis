@@ -101,7 +101,7 @@ seed 고정 가능
 같은 seed -> 같은 zone별 작업자 수
 ```
 
-기본 seed는 `42`이다.
+기본 seed는 `42`이다. (seed 값 고정 이유는 동일 조건에서 재현이 가능하도록 하기 위함.)
 
 ### 2. Equal Allocation
 
