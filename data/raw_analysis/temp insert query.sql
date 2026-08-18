@@ -1,0 +1,12 @@
+create table temp (
+    col1 varchar2(4000)
+    ,col2 varchar2(4000)
+    ,col3 varchar2(4000)
+    ,col4 varchar2(4000)
+    ,col5 varchar2(4000)
+    ,col6 varchar2(4000)
+    ,col7 varchar2(4000)
+    ,col8 varchar2(4000)
+    ,col9 varchar2(4000)
+    ,col10 varchar2(4000)
+)
