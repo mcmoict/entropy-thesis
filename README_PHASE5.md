@@ -27,16 +27,9 @@ results/phase4/phase4_recommendation.json
 - frozen Holdout dates
 ```
 
-현재 저장된 Phase 4 결과는 다음과 같다.
+Phase 5는 **새 정수 목적함수 모델 revision**으로 생성된 Phase 4 recommendation만 허용한다. 이전 연속 가중치 방식에서 계산된 λ*와 Holdout 결과는 재사용하지 않는다.
 
-```text
-Calibration dates : 92
-Holdout dates     : 40
-Selected λ*       : 0.05
-Primary metric    : mean_flow_time_seconds
-```
-
-Phase 5는 recommendation 파일이 없거나, 최신 `phase=4E` 형식이 아니거나, Calibration/Holdout 날짜가 겹치면 실행을 중단한다.
+Phase 5는 recommendation 파일이 없거나, 최신 `phase=4E` 형식이 아니거나, model revision이 다르거나, Calibration/Holdout 날짜가 겹치면 실행을 중단한다.
 
 ## 2. 본 실험 실행
 
@@ -135,7 +128,7 @@ baseline            : Picking_Wave.csv의 원본 operator -> picking-list 배정
 random              : 활성 Zone 최소 인원 + 잔여 인원 seed 기반 무작위 배치
 equal               : 활성 Zone에 가능한 균등 배치
 volume_proportional : 날짜별 Zone workload 비율에 비례 배치
-entropy_based       : 고정 λ*로 macro workload × (1 + λ* × micro-zone concentration)을 적용한 배치
+entropy_based       : 고정 λ*에서 J(n;λ)=D(n)+λR(n)을 최소화한 정수 배치
 
 === Worker Allocation | Holdout Mean by Zone (40 dates) ===
 Zone   Workload(%)   Baseline*   Random   Equal   Volume   Entropy   Baseline touch**
@@ -177,7 +170,7 @@ Entropy vs Volume Proportional
 
 ## 8. 정수 작업자 배치 동일성 확인
 
-λ*=0.05처럼 작은 가중치는 연속 점수에서는 차이를 만들더라도 최종 정수 작업자 수로 변환될 때 Volume 배치와 같은 결과를 만들 수 있다.
+새 Phase 4는 정수 배치를 직접 최적화하지만, 서로 다른 λ가 동일한 최적 정수 벡터를 선택하는 구간은 여전히 존재할 수 있다.
 
 이를 분리해서 확인하기 위해 날짜별로 다음을 저장한다.
 
@@ -246,7 +239,7 @@ Phase 4에서 사용한 primary KPI만 추린 논문용 핵심 비교표이다.
 
 ### phase5_allocation_equivalence.csv
 
-Entropy 정수 작업자 배치가 Random / Equal / Volume과 동일한 날짜인지 기록한다. λ*=0.05의 실제 효과가 정수화 과정에서 소멸하는지 분석할 때 사용한다.
+Entropy 정수 작업자 배치가 Random / Equal / Volume과 동일한 날짜인지 기록한다. λ 구간별로 동일한 최적 정수 벡터가 반복되는지 분석할 때 사용한다.
 
 ### phase5_metadata.json
 

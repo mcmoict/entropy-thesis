@@ -47,6 +47,7 @@ SelectionMetric = Literal[
 DEFAULT_ENTROPY_WEIGHTS: tuple[float, ...] = (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0)
 DEFAULT_SELECTION_METRIC: SelectionMetric = "mean_flow_time_seconds"
 MAXIMIZE_METRICS = {"mean_spatial_entropy_normalized"}
+PHASE4_MODEL_REVISION = f"{THESIS_MODEL_REVISION}-integer-objective-v1"
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,10 @@ class EntropyAllocationCandidate:
     allocation_id: str
     worker_counts: tuple[int, ...]
     reused_allocation: bool
+    demand_mismatch: float = float("nan")
+    congestion_risk: float = float("nan")
+    objective_value: float = float("nan")
+    moved_workers_from_volume: int = 0
 
 
 @dataclass(frozen=True)
@@ -98,17 +103,31 @@ def allocate_phase4_workers(
     microzone_concentrations: Iterable[float] | None = None,
     minimum_per_active_zone: int = 1,
 ) -> tuple[int, ...]:
-    """Allocate workers using macro workload plus within-zone demand concentration.
+    """Return the best *integer* worker vector for the Phase-4 objective.
 
-    For macro-zone ``z`` the adjusted allocation weight is
+    Feasible integer allocations are evaluated directly rather than creating a
+    continuous entropy-adjusted weight and rounding it afterwards.
 
-        adjusted_z = workload_z * (1 + lambda * concentration_z)
+    Let ``d_z = workload_z / sum(workload)`` and ``p_z = n_z / N``.  The
+    demand-fit term is the total-variation distance
 
-    where ``concentration_z = 1 - H_z`` and ``H_z`` is normalized Shannon
-    entropy of the five micro-zone workloads inside that macro-zone.  Thus
-    ``lambda=0`` is exactly Phase-3 volume proportional allocation. Positive
-    lambda gives additional weight to macro-zones whose demand is spatially
-    concentrated, which is the proposed entropy-aware mechanism.
+        D(n) = 0.5 * sum_z |p_z - d_z|.
+
+    Let ``C_z = 1 - H_z`` be the within-macro-zone micro-demand concentration.
+    The congestion-risk term counts worker pairs placed in the same macro-zone,
+    weighted by ``C_z``:
+
+        R(n) = sum_z C_z * choose(n_z, 2).
+
+    Phase 4 minimizes
+
+        J(n; lambda) = D(n) + lambda * R(n)
+
+    subject to integer worker counts, the fixed total-worker constraint, zero
+    workers in inactive zones, and the requested minimum in every active zone.
+    Consequently lambda can change one worker's discrete assignment directly.
+    At lambda=0 the existing Phase-3 Volume Proportional allocation is used as
+    the exact control allocation.
     """
 
     if isinstance(total_workers, bool) or not isinstance(total_workers, int):
@@ -155,20 +174,157 @@ def allocate_phase4_workers(
             f"minimum={minimum_per_active_zone}"
         )
 
-    adjusted = [
-        values[index] * (1.0 + regularization * concentrations[index])
-        for index in active_indices
-    ]
-    active_counts = allocate_workers(
+    options, volume_counts = _integer_allocation_options(
+        total_workers=total_workers,
+        workloads=values,
+        microzone_concentrations=concentrations,
+        minimum_per_active_zone=minimum_per_active_zone,
+    )
+    if math.isclose(regularization, 0.0, abs_tol=1e-15):
+        return volume_counts
+
+    best_counts, _, _ = min(
+        options,
+        key=lambda item: (
+            item[1] + regularization * item[2],
+            item[1],
+            item[2],
+            _moved_worker_count(item[0], volume_counts),
+            item[0],
+        ),
+    )
+    return best_counts
+
+
+def _moved_worker_count(
+    worker_counts: Iterable[int],
+    reference_counts: Iterable[int],
+) -> int:
+    """Minimum number of workers that must change zones between two vectors."""
+
+    left = tuple(int(value) for value in worker_counts)
+    right = tuple(int(value) for value in reference_counts)
+    if len(left) != len(right):
+        raise ValueError("worker count 벡터 길이가 다릅니다.")
+    if sum(left) != sum(right):
+        raise ValueError("worker count 벡터의 총 작업자 수가 다릅니다.")
+    return sum(abs(a - b) for a, b in zip(left, right, strict=True)) // 2
+
+
+def score_phase4_allocation(
+    *,
+    worker_counts: Iterable[int],
+    workloads: Iterable[float],
+    microzone_concentrations: Iterable[float],
+    entropy_weight: float,
+) -> tuple[float, float, float]:
+    """Return ``(D, R, J)`` for one integer worker allocation."""
+
+    counts = tuple(int(value) for value in worker_counts)
+    values = tuple(float(value) for value in workloads)
+    concentrations = tuple(float(value) for value in microzone_concentrations)
+    if not counts or len(counts) != len(values) or len(values) != len(concentrations):
+        raise ValueError("worker_counts/workloads/concentrations 길이가 올바르지 않습니다.")
+    if any(value < 0 for value in counts):
+        raise ValueError("worker_counts는 음수가 될 수 없습니다.")
+    if any(not math.isfinite(value) or value < 0.0 for value in values):
+        raise ValueError("workloads는 0 이상의 유한한 수여야 합니다.")
+    if any(
+        not math.isfinite(value) or value < 0.0 or value > 1.0
+        for value in concentrations
+    ):
+        raise ValueError("microzone_concentrations는 0~1 범위여야 합니다.")
+    weight = float(entropy_weight)
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError("entropy_weight는 0 이상의 유한한 수여야 합니다.")
+
+    total_workers = sum(counts)
+    total_workload = sum(values)
+    if total_workers <= 0 or total_workload <= 0.0:
+        raise ValueError("양의 total workers/workload가 필요합니다.")
+
+    demand_mismatch = 0.5 * sum(
+        abs((count / total_workers) - (workload / total_workload))
+        for count, workload in zip(counts, values, strict=True)
+    )
+    congestion_risk = sum(
+        concentration * math.comb(count, 2)
+        for count, concentration in zip(counts, concentrations, strict=True)
+    )
+    objective_value = demand_mismatch + weight * congestion_risk
+    return demand_mismatch, congestion_risk, objective_value
+
+
+def _feasible_integer_allocations(
+    *,
+    total_workers: int,
+    workloads: tuple[float, ...],
+    minimum_per_active_zone: int,
+) -> tuple[tuple[int, ...], ...]:
+    active = tuple(index for index, workload in enumerate(workloads) if workload > 0.0)
+    minimums = [0] * len(workloads)
+    for index in active:
+        minimums[index] = minimum_per_active_zone
+    remaining = total_workers - sum(minimums)
+    if remaining < 0:
+        return tuple()
+
+    allocations: list[tuple[int, ...]] = []
+
+    def visit(active_position: int, workers_left: int, counts: list[int]) -> None:
+        if active_position == len(active) - 1:
+            final = active[active_position]
+            counts[final] = minimums[final] + workers_left
+            allocations.append(tuple(counts))
+            counts[final] = minimums[final]
+            return
+        zone_index = active[active_position]
+        for extra in range(workers_left + 1):
+            counts[zone_index] = minimums[zone_index] + extra
+            visit(active_position + 1, workers_left - extra, counts)
+        counts[zone_index] = minimums[zone_index]
+
+    if not active:
+        return tuple()
+    visit(0, remaining, minimums.copy())
+    return tuple(allocations)
+
+
+def _integer_allocation_options(
+    *,
+    total_workers: int,
+    workloads: tuple[float, ...],
+    microzone_concentrations: tuple[float, ...],
+    minimum_per_active_zone: int,
+) -> tuple[tuple[tuple[tuple[int, ...], float, float], ...], tuple[int, ...]]:
+    active_indices = [index for index, value in enumerate(workloads) if value > 0.0]
+    active_workloads = [workloads[index] for index in active_indices]
+    active_volume_counts = allocate_workers(
         "volume_proportional",
         total_workers,
-        adjusted,
+        active_workloads,
         minimum_per_zone=minimum_per_active_zone,
     )
-    result = [0] * len(values)
-    for index, count in zip(active_indices, active_counts, strict=True):
-        result[index] = int(count)
-    return tuple(result)
+    volume_result = [0] * len(workloads)
+    for index, count in zip(active_indices, active_volume_counts, strict=True):
+        volume_result[index] = int(count)
+    volume_counts = tuple(volume_result)
+
+    feasible = _feasible_integer_allocations(
+        total_workers=total_workers,
+        workloads=workloads,
+        minimum_per_active_zone=minimum_per_active_zone,
+    )
+    options: list[tuple[tuple[int, ...], float, float]] = []
+    for counts in feasible:
+        demand_mismatch, congestion_risk, _ = score_phase4_allocation(
+            worker_counts=counts,
+            workloads=workloads,
+            microzone_concentrations=microzone_concentrations,
+            entropy_weight=0.0,
+        )
+        options.append((counts, demand_mismatch, congestion_risk))
+    return tuple(options), volume_counts
 
 def build_entropy_candidates(
     *,
@@ -186,16 +342,40 @@ def build_entropy_candidates(
 
     weights = _validate_entropy_weights(entropy_weights)
     workload_values = tuple(float(value) for value in workloads)
+    if microzone_concentrations is None:
+        concentrations = (0.0,) * len(workload_values)
+    else:
+        concentrations = tuple(float(value) for value in microzone_concentrations)
+    options, volume_counts = _integer_allocation_options(
+        total_workers=total_workers,
+        workloads=workload_values,
+        microzone_concentrations=concentrations,
+        minimum_per_active_zone=minimum_per_active_zone,
+    )
+
     allocation_ids: dict[tuple[int, ...], str] = {}
     candidates: list[EntropyAllocationCandidate] = []
     for entropy_weight in weights:
-        counts = allocate_phase4_workers(
-            total_workers=total_workers,
-            workloads=workload_values,
-            entropy_weight=entropy_weight,
-            microzone_concentrations=microzone_concentrations,
-            minimum_per_active_zone=minimum_per_active_zone,
-        )
+        if math.isclose(entropy_weight, 0.0, abs_tol=1e-15):
+            counts = volume_counts
+            demand_mismatch, congestion_risk, objective_value = score_phase4_allocation(
+                worker_counts=counts,
+                workloads=workload_values,
+                microzone_concentrations=concentrations,
+                entropy_weight=entropy_weight,
+            )
+        else:
+            counts, demand_mismatch, congestion_risk = min(
+                options,
+                key=lambda item: (
+                    item[1] + entropy_weight * item[2],
+                    item[1],
+                    item[2],
+                    _moved_worker_count(item[0], volume_counts),
+                    item[0],
+                ),
+            )
+            objective_value = demand_mismatch + entropy_weight * congestion_risk
         if counts not in allocation_ids:
             allocation_ids[counts] = f"A{len(allocation_ids) + 1:03d}"
             reused = False
@@ -207,6 +387,10 @@ def build_entropy_candidates(
                 allocation_id=allocation_ids[counts],
                 worker_counts=counts,
                 reused_allocation=reused,
+                demand_mismatch=demand_mismatch,
+                congestion_risk=congestion_risk,
+                objective_value=objective_value,
+                moved_workers_from_volume=_moved_worker_count(counts, volume_counts),
             )
         )
     return tuple(candidates)
@@ -276,6 +460,10 @@ def _candidate_summary_records(
             "allocation_id": item.candidate.allocation_id,
             "worker_counts": "|".join(str(v) for v in item.candidate.worker_counts),
             "reused_allocation": item.candidate.reused_allocation,
+            "D_demand_mismatch": item.candidate.demand_mismatch,
+            "R_congestion_risk": item.candidate.congestion_risk,
+            "J_objective": item.candidate.objective_value,
+            "moved_workers_from_volume": item.candidate.moved_workers_from_volume,
             "selected": item.candidate == selected.candidate,
         }
         summary = asdict(item.simulation.summary)
@@ -470,6 +658,7 @@ def build_and_run_phase4(
     sample_seconds: float = 5.0,
     return_to_io: bool = True,
     progress: ConsoleProgress | None = None,
+    print_objective_diagnostic: bool = False,
 ) -> tuple[
     DatasetBundle,
     WarehouseGraph,
@@ -523,6 +712,14 @@ def build_and_run_phase4(
         microzone_concentrations=microzone_concentrations,
         minimum_per_active_zone=minimum_per_active_zone,
     )
+    if print_objective_diagnostic:
+        _print_integer_objective_diagnostic_pre_des(
+            selected_date=selected_date,
+            zones=zones,
+            workloads=workloads,
+            microzone_concentrations=microzone_concentrations,
+            candidates=candidates,
+        )
     unique_candidates: dict[str, EntropyAllocationCandidate] = {}
     for candidate in candidates:
         unique_candidates.setdefault(candidate.allocation_id, candidate)
@@ -555,6 +752,12 @@ def build_and_run_phase4(
                     + ", ".join(
                         f"{zone.zone_id}={count}"
                         for zone, count in zip(zones, candidate.worker_counts, strict=True)
+                    )
+                    + (
+                        f" | D={candidate.demand_mismatch:.6f}, "
+                        f"R={candidate.congestion_risk:.6f}, "
+                        f"J={candidate.objective_value:.6f}, "
+                        f"move={candidate.moved_workers_from_volume}"
                     )
                 ),
             )
@@ -612,6 +815,119 @@ def _parse_entropy_weights(value: str) -> tuple[float, ...]:
         )
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _movement_description(
+    candidate_counts: tuple[int, ...],
+    volume_counts: tuple[int, ...],
+    zones: tuple[AisleZone, ...],
+) -> str:
+    decreases: list[str] = []
+    increases: list[str] = []
+    for zone, current, base in zip(zones, candidate_counts, volume_counts, strict=True):
+        delta = current - base
+        if delta < 0:
+            decreases.extend([zone.zone_id] * (-delta))
+        elif delta > 0:
+            increases.extend([zone.zone_id] * delta)
+    if not decreases and not increases:
+        return "none"
+    if len(decreases) == len(increases):
+        return ", ".join(f"{source}->{target}" for source, target in zip(decreases, increases, strict=True))
+    return "allocation changed"
+
+
+def _print_integer_objective_diagnostic_pre_des(
+    *,
+    selected_date: date,
+    zones: tuple[AisleZone, ...],
+    workloads: tuple[float, ...],
+    microzone_concentrations: tuple[float, ...],
+    candidates: tuple[EntropyAllocationCandidate, ...],
+) -> None:
+    """Print the complete integer-objective table before any DES execution."""
+
+    print()
+    print(f"=== Phase 4 Integer Objective | PRE-DES | {selected_date.isoformat()} ===")
+    print("Objective             : J(n;λ) = D(n) + λ R(n)")
+    print("D(n)                  : 0.5 × Σ |worker_share_z - workload_share_z|")
+    print("R(n)                  : Σ C_z × C(n_z, 2),  C_z = 1 - H_z")
+    print("Integer constraints    : Σ n_z=N; active n_z>=minimum; inactive n_z=0")
+    print()
+    print("Zone        Workload   Share      C_z(1-H)")
+    total_workload = sum(workloads)
+    for zone, workload, concentration in zip(
+        zones, workloads, microzone_concentrations, strict=True
+    ):
+        share = 0.0 if total_workload <= 0.0 else workload / total_workload
+        print(f"{zone.zone_id:<8} {workload:>10,.2f}   {share:>7.4f}      {concentration:>8.6f}")
+
+    volume = next(
+        (candidate for candidate in candidates if math.isclose(candidate.entropy_weight, 0.0, abs_tol=1e-15)),
+        candidates[0],
+    )
+    print()
+    print("=== ①~③ Integer Allocation Check (before DES) ===")
+    print("Lambda   Allocation       D          R          J        Move   Worker move")
+    first_move: EntropyAllocationCandidate | None = None
+    for candidate in candidates:
+        if candidate.moved_workers_from_volume > 0 and first_move is None:
+            first_move = candidate
+        allocation = "[" + ",".join(str(value) for value in candidate.worker_counts) + "]"
+        movement = _movement_description(candidate.worker_counts, volume.worker_counts, zones)
+        print(
+            f"{candidate.entropy_weight:<8g} {allocation:<15} "
+            f"{candidate.demand_mismatch:>9.6f} "
+            f"{candidate.congestion_risk:>10.6f} "
+            f"{candidate.objective_value:>10.6f} "
+            f"{candidate.moved_workers_from_volume:>5d}   {movement}"
+        )
+    print()
+    if first_move is None:
+        print("Worker movement check : no λ candidate changes the Volume allocation")
+    else:
+        allocation = "[" + ",".join(str(value) for value in first_move.worker_counts) + "]"
+        movement = _movement_description(first_move.worker_counts, volume.worker_counts, zones)
+        print(
+            "Worker movement check : "
+            f"FIRST at λ={first_move.entropy_weight:g} -> {allocation}; "
+            f"{first_move.moved_workers_from_volume} worker moved ({movement})"
+        )
+    print("DES status            : objective table confirmed; DES starts next")
+    print()
+
+
+def _print_single_date_diagnostic(
+    *,
+    selected_date: date,
+    results: tuple[Phase4CandidateResult, ...],
+    selected: Phase4CandidateResult,
+    output_dir: Path,
+) -> None:
+    print()
+    print(f"=== ④ DES KPI by Lambda | {selected_date.isoformat()} ===")
+    print(
+        "Lambda   Allocation       Distance(m)  Conflicts   Wait(s)  Cong(%)  "
+        "Release(s)  Flow(s)  Makespan(s)  SpatialH(2+)"
+    )
+    for item in results:
+        summary = item.simulation.summary
+        allocation = "[" + ",".join(str(value) for value in item.candidate.worker_counts) + "]"
+        marker = "*" if item.candidate == selected.candidate else " "
+        print(
+            f"{marker}{item.candidate.entropy_weight:<7g} {allocation:<15} "
+            f"{summary.total_distance_m:>11,.2f} "
+            f"{summary.congestion_conflicts:>10,d} "
+            f"{summary.congestion_wait_seconds:>9,.2f} "
+            f"{100.0 * summary.congestion_delay_ratio:>8.2f} "
+            f"{summary.mean_release_delay_seconds:>10,.2f} "
+            f"{summary.mean_flow_time_seconds:>8,.2f} "
+            f"{summary.makespan_seconds:>11,.2f} "
+            f"{summary.mean_spatial_entropy_multiworker:>13.4f}"
+        )
+    print()
+    print(f"Selected by DES KPI   : λ={selected.candidate.entropy_weight:g}")
+    print(f"Diagnostic results    : {output_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +1202,12 @@ def _run_phase4_calibration_date(
                         f"{zone.zone_id}={count}"
                         for zone, count in zip(zones, candidate.worker_counts, strict=True)
                     )
+                    + (
+                        f" | D={candidate.demand_mismatch:.6f}, "
+                        f"R={candidate.congestion_risk:.6f}, "
+                        f"J={candidate.objective_value:.6f}, "
+                        f"move={candidate.moved_workers_from_volume}"
+                    )
                 ),
             )
         simulations[candidate.allocation_id] = run_phase3_method(
@@ -936,6 +1258,10 @@ def phase4_daily_records(run: Phase4MultiDateRun) -> list[dict[str, object]]:
                 "allocation_id": item.candidate.allocation_id,
                 "worker_counts": "|".join(str(v) for v in item.candidate.worker_counts),
                 "reused_allocation": item.candidate.reused_allocation,
+                "D_demand_mismatch": item.candidate.demand_mismatch,
+                "R_congestion_risk": item.candidate.congestion_risk,
+                "J_objective": item.candidate.objective_value,
+                "moved_workers_from_volume": item.candidate.moved_workers_from_volume,
                 "observed_workers": date_result.observed_workers,
                 "effective_workers": date_result.effective_workers,
             }
@@ -960,9 +1286,7 @@ def phase4_allocation_records(run: Phase4MultiDateRun) -> list[dict[str, object]
                 item.candidate.worker_counts,
                 strict=True,
             ):
-                adjusted_workload = workload * (
-                    1.0 + item.candidate.entropy_weight * concentration
-                )
+                pair_risk_contribution = concentration * math.comb(workers, 2)
                 records.append(
                     {
                         "selected_date": date_result.selected_date.isoformat(),
@@ -975,9 +1299,13 @@ def phase4_allocation_records(run: Phase4MultiDateRun) -> list[dict[str, object]
                         "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
                         "microzone_concentration": concentration,
                         "microzone_entropy_normalized": 1.0 - concentration,
-                        "entropy_adjusted_workload": adjusted_workload,
+                        "pair_congestion_risk_contribution": pair_risk_contribution,
                         "workers": workers,
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
+                        "D_demand_mismatch": item.candidate.demand_mismatch,
+                        "R_congestion_risk": item.candidate.congestion_risk,
+                        "J_objective": item.candidate.objective_value,
+                        "moved_workers_from_volume": item.candidate.moved_workers_from_volume,
                     }
                 )
     return records
@@ -1276,7 +1604,8 @@ def write_phase4_multidate_results(
     ].iloc[0]
     recommendation = {
         "phase": "4E",
-        "model_revision": THESIS_MODEL_REVISION,
+        "model_revision": PHASE4_MODEL_REVISION,
+        "allocation_objective": "J(n;lambda)=D(n)+lambda*R(n)",
         "selection_metric": run.selection_metric,
         "direction": "maximize" if run.selection_metric in MAXIMIZE_METRICS else "minimize",
         "entropy_weight": run.selected_entropy_weight,
@@ -1302,7 +1631,7 @@ def write_phase4_multidate_results(
 
     metadata = {
         "phase": 4,
-        "model_revision": THESIS_MODEL_REVISION,
+        "model_revision": PHASE4_MODEL_REVISION,
         "workflow": "4A_full_dates -> 4B_split -> 4C_calibration_DES -> 4D_statistics -> 4E_lambda_star",
         "input": {
             "storage_locations": len(run.dataset.storage_locations),
@@ -1323,13 +1652,18 @@ def write_phase4_multidate_results(
             "phase4B": "날짜 단위로 Calibration/Holdout을 분리하며 Holdout 날짜는 Phase 4C DES에 사용하지 않는다.",
             "phase4C": (
                 "각 날짜에서 20개 micro-zone 수요를 4개 macro-zone 내부 Shannon entropy로 요약하고 "
-                "C_z=1-H_z를 계산한다. 각 λ에 대해 A_z=V_z*(1+λ*C_z) 가중치로 작업자를 배치하며, "
+                "C_z=1-H_z를 계산한다. 가능한 정수 worker vector n을 직접 열거하여 "
+                "D(n)=0.5*Σ|n_z/N-V_z/ΣV|, R(n)=Σ C_z*C(n_z,2), "
+                "J(n;λ)=D(n)+λR(n)을 최소화하며, "
                 "동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다."
             ),
             "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
             "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
-            "lambda_zero": "λ=0이면 A_z=V_z이므로 Volume Proportional Allocation과 정확히 동일하다.",
+            "lambda_zero": "λ=0은 Phase 3 Volume Proportional의 정수 배치를 정확히 control로 사용한다.",
             "entropy_concentration": "C_z=1-H_z. H_z는 macro-zone 내부 5개 micro-zone workload의 normalized Shannon entropy이다.",
+            "D_demand_mismatch": "수요비중과 정수 작업자비중의 total-variation distance. 작을수록 Volume 배치에 가깝다.",
+            "R_congestion_risk": "같은 macro-zone에 배치된 작업자 쌍 C(n_z,2)을 해당 zone의 수요 집중도 C_z로 가중한 정수 혼잡위험 지수.",
+            "J_integer_objective": "D + lambda*R. lambda가 커질수록 수요 적합도 손실을 감수하고 집중 zone의 동시 작업자 쌍을 줄일 수 있다.",
             "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다.",
         },
     }
@@ -1342,6 +1676,16 @@ def main() -> None:
         description="Entropy Thesis - Phase 4A~4E multi-date entropy calibration"
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
+    parser.add_argument(
+        "--date",
+        dest="target_date",
+        type=_parse_date,
+        default=None,
+        help=(
+            "single-date integer-objective diagnostic mode. Example: 2023-01-05. "
+            "When supplied, Phase 4A~4E multi-date calibration is not executed."
+        ),
+    )
     parser.add_argument("--min-lists", type=int, default=DEFAULT_MIN_LISTS_PER_DATE)
     parser.add_argument("--calibration-ratio", type=float, default=DEFAULT_CALIBRATION_RATIO)
     parser.add_argument(
@@ -1374,6 +1718,111 @@ def main() -> None:
     parser.add_argument("--no-return-to-io", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=Path("results/phase4"))
     args = parser.parse_args()
+
+    if args.target_date is not None:
+        progress = ConsoleProgress()
+        progress.start(
+            f"Phase 4 integer-objective single-date diagnostic ({args.target_date.isoformat()})"
+        )
+        (
+            dataset,
+            warehouse,
+            audit,
+            selected_date,
+            selected_lists,
+            zones,
+            assignments,
+            demand_entropy,
+            results,
+            selected,
+            origin,
+        ) = build_and_run_phase4(
+            args.data_dir,
+            target_date=args.target_date,
+            max_lists=args.max_lists,
+            number_of_zones=args.zones,
+            total_workers=args.workers,
+            volume_basis=args.volume_basis,
+            minimum_per_active_zone=args.minimum_per_active_zone,
+            entropy_weights=args.entropy_weights,
+            selection_metric=args.selection_metric,
+            seed=args.seed,
+            walking_speed_mps=args.speed,
+            pick_seconds_per_unit=args.pick_seconds,
+            edge_capacity=args.edge_capacity,
+            pick_node_capacity=args.pick_node_capacity,
+            sample_seconds=args.sample_seconds,
+            return_to_io=not args.no_return_to_io,
+            progress=progress,
+            print_objective_diagnostic=True,
+        )
+        workloads = zone_workload(zones, assignments, basis=args.volume_basis)
+        macro_profiles = macro_zone_demand_profiles(
+            warehouse, selected_lists, zones, basis=args.volume_basis
+        )
+        concentrations = tuple(
+            profile.microzone_concentration for profile in macro_profiles
+        )
+        diagnostic_output_dir = args.output_dir / f"diagnostic_{selected_date.isoformat()}"
+        parameters = {
+            "selection_metric": args.selection_metric,
+            "target_date": selected_date.isoformat(),
+            "max_lists": args.max_lists,
+            "zones": args.zones,
+            "workers": args.workers,
+            "volume_basis": args.volume_basis,
+            "minimum_per_active_zone": args.minimum_per_active_zone,
+            "entropy_weights": list(args.entropy_weights),
+            "seed": args.seed,
+            "walking_speed_mps": args.speed,
+            "pick_seconds_per_unit": args.pick_seconds,
+            "edge_capacity": args.edge_capacity,
+            "pick_node_capacity": args.pick_node_capacity,
+            "sample_seconds": args.sample_seconds,
+            "return_to_io": not args.no_return_to_io,
+        }
+        metadata = {
+            "phase": "4-diagnostic",
+            "model_revision": PHASE4_MODEL_REVISION,
+            "selected_date": selected_date.isoformat(),
+            "parameters": parameters,
+            "definitions": {
+                "integer_objective": "J(n;lambda) = D(n) + lambda * R(n)",
+                "D": "0.5 * sum_z |n_z/N - V_z/sum(V)|",
+                "R": "sum_z (1-H_z) * choose(n_z, 2)",
+                "lambda_zero": "lambda=0 uses the exact Phase-3 Volume Proportional integer allocation",
+                "movement": "0.5 * L1 distance from the lambda=0 worker-count vector",
+            },
+            "input": {
+                "storage_locations": len(dataset.storage_locations),
+                "support_points": len(dataset.support_points),
+                "fully_resolvable_lists_total": audit.fully_resolvable_lists,
+                "selected_lists": len(selected_lists),
+                "observed_workers": len({item.operator for item in selected_lists}),
+            },
+            "demand_entropy": asdict(demand_entropy),
+        }
+        write_phase4_results(
+            diagnostic_output_dir,
+            zones=zones,
+            workloads=workloads,
+            results=results,
+            selected=selected,
+            origin=origin,
+            metadata=metadata,
+        )
+        progress.complete("Phase 4 single-date diagnostic completed")
+        _print_single_date_diagnostic(
+            selected_date=selected_date,
+            results=results,
+            selected=selected,
+            output_dir=diagnostic_output_dir,
+        )
+        print(
+            f"Total execution time  : {format_duration(progress.elapsed_seconds)} "
+            f"({progress.elapsed_seconds:,.2f} s)"
+        )
+        return
 
     progress = ConsoleProgress()
     progress.start("Phase 4A~4E multi-date entropy calibration")

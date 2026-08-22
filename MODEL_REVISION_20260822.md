@@ -32,29 +32,34 @@ Picking list는 분할하지 않는다. 원래 pick sequence를 보존하며, li
 
 ## 3. Entropy-aware Allocation
 
-Macro-zone `z` 내부 5개 micro-zone의 workload 분포에 대해 normalized Shannon entropy `H_z`를 계산한다.
+> **2026-08-23 추가 개정:** 2026-08-22의 연속 가중치→반올림 방식은 λ 변화가 실제 정수 인력배치 변화로 이어지지 않는 문제가 있어 폐기하고, Phase 4에서 아래 정수 목적함수로 대체했다. 물리/공간모델(CC-08, inch, 20 micro-zone, 4 macro-zone)은 그대로 유지한다.
+
+Macro-zone `z` 내부 5개 micro-zone의 workload 분포에 대해 normalized Shannon entropy `H_z`와 집중도 `C_z=1-H_z`를 계산한다. `V_z`는 dominant-list dispatch 기준 macro-zone workload, `N`은 총 작업자 수, `n_z`는 zone별 정수 작업자 수이다.
 
 ```text
-C_z = 1 - H_z
-A_z(lambda) = V_z * (1 + lambda * C_z)
+d_z = V_z / ΣV_z
+p_z = n_z / N
+D(n) = 0.5 × Σ |p_z - d_z|
+R(n) = Σ C_z × C(n_z, 2)
+J(n; lambda) = D(n) + lambda × R(n)
 ```
 
-- `V_z`: dominant-list dispatch 기준 macro-zone workload
-- `H_z`: macro-zone 내부 5개 micro-zone의 normalized Shannon entropy
-- `C_z`: 내부 공간 수요 집중도
-- `A_z(lambda)`: λ 적용 후 인력배치 가중치
-- `lambda = 0`: 정확히 Volume Proportional Allocation
-- `lambda > 0`: 동일/유사 물동량이라도 내부 수요가 더 집중된 macro-zone에 추가 가중치
+- `D(n)`: 수요비중과 작업자비중의 불일치(total-variation distance)
+- `R(n)`: 같은 macro-zone에 배치된 작업자 쌍을 수요 집중도 `C_z`로 가중한 혼잡위험
+- `lambda = 0`: Phase 3 Volume Proportional의 정수 배치를 정확한 control로 사용
+- `lambda > 0`: `D` 손실을 감수하더라도 집중 zone의 작업자 쌍 위험 `R`을 줄이는 정수 배치를 선택 가능
 
-작업자는 `A_z(lambda)`에 비례하여 기존 deterministic apportionment 로직으로 정수 배정한다.
+가능한 정수 `[n1,n2,n3,n4]`를 직접 열거하여 `J`가 최소인 배치를 선택한다. 따라서 λ가 일정 임계값을 넘으면 **작업자 1명의 실제 zone 이동**이 목적함수 수준에서 직접 발생한다.
 
 ## 4. 기존 결과의 취급
 
-이 변경은 이동거리, 이동시간, 혼잡, 대기, release delay proxy, flow time, makespan뿐 아니라 Phase 4 λ 선택에도 영향을 줄 수 있다.
-따라서 기존 `λ*=0.05`와 기존 Phase 5 holdout 결과는 현재 모델의 최종 결과로 사용하지 않는다.
+물리모델 정정 및 2026-08-23 정수 목적함수 개정은 이동거리, 이동시간, 혼잡, 대기, release delay proxy, flow time, makespan뿐 아니라 Phase 4 λ 선택에도 영향을 준다. 따라서 이전 방식에서 계산한 λ*와 Phase 5 holdout 결과는 현재 모델의 최종 결과로 사용하지 않는다.
 
-이전 결과는 `results_legacy_pre_20260822_cc01_cm/`로 이동했다. 새 `results/`는 비워 두었다.
-Phase 5는 `phase4_recommendation.json`의 `model_revision`을 검사하여 이전 모델의 recommendation을 자동 거부한다.
+- CC-01 / centimeter 기반 구 결과: 별도 legacy 결과로 취급
+- CC-08 / micro20-macro4이지만 **연속 가중치→반올림**을 사용한 Phase 4/5 결과: `results_legacy_pre_20260823_integer_objective/`로 이동
+- 새 `results/phase4`, `results/phase5`: 정수 목적함수 재실행용으로 비움
+
+Phase 5는 `phase4_recommendation.json`의 `model_revision`을 검사하여 `2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1`이 아닌 recommendation을 자동 거부한다.
 
 ## 5. 실제 데이터 정적 검증 (DES 실행 전)
 

@@ -95,20 +95,29 @@ C_z = 1 - H_z
 
 `C_z`는 0~1 범위의 수요 집중도이다. 5개 micro-zone에 수요가 고르게 퍼질수록 0에 가깝고, 한두 micro-zone에 집중될수록 1에 가까워진다.
 
-Picking list를 dominant macro-zone으로 귀속해 계산한 macro workload를 `V_z`라고 할 때 λ 후보별 배치 가중치는 다음과 같다.
+Picking list를 dominant macro-zone으로 귀속해 계산한 macro workload를 `V_z`, 전체 작업자 수를 `N`, zone별 정수 작업자 수를 `n_z`라고 한다. Phase 4는 더 이상 연속 가중치를 만든 뒤 반올림하지 않고, **가능한 정수 작업자 배치 벡터를 직접 평가**한다.
 
 ```text
-A_z(lambda) = V_z * (1 + lambda * C_z)
+d_z = V_z / ΣV_z
+p_z = n_z / N
+
+D(n) = 0.5 × Σ |p_z - d_z|
+R(n) = Σ C_z × C(n_z, 2)
+J(n; lambda) = D(n) + lambda × R(n)
 ```
 
-작업자 수는 `A_z(lambda)`에 비례하여 water-filling + largest-remainder 방식으로 정수 배정한다.
+여기서 `D(n)`은 Volume 수요비중과 정수 작업자비중의 불일치(total-variation distance)이고, `R(n)`은 같은 macro-zone에 함께 배치된 작업자 쌍의 수를 해당 zone의 수요 집중도 `C_z`로 가중한 혼잡위험 지수이다.
+
+제약조건은 다음과 같다.
 
 ```text
-lambda = 0  -> 정확히 Volume Proportional Allocation
-lambda 증가 -> 같은 물동량이라도 내부 micro-zone 수요가 더 집중된 macro-zone에 추가 가중치
+Σ n_z = N
+n_z는 정수
+활성 zone: n_z >= minimum_per_active_zone
+비활성 zone: n_z = 0
 ```
 
-즉 이전의 “λ가 커질수록 Equal Allocation으로 평탄화”하는 엔트로피 정규화가 아니라, **국소 수요 집중도를 인력배치 가중치에 반영하는 entropy-aware allocation**으로 변경되었다.
+`lambda=0`은 Phase 3의 기존 Volume Proportional 정수 배치를 정확한 control로 사용한다. `lambda`가 증가하면 수요 적합도 `D`가 조금 나빠지더라도, 수요가 집중된 zone에서 여러 작업자가 동시에 겹치는 위험 `R`을 줄이는 정수 배치가 선택될 수 있다. 따라서 λ 변화가 **작업자 한 명의 실제 zone 이동 결정**으로 직접 연결된다.
 
 기본 λ 후보는 다음과 같다.
 
@@ -118,7 +127,26 @@ lambda 증가 -> 같은 물동량이라도 내부 micro-zone 수요가 더 집�
 
 각 Calibration 날짜마다 위 λ 후보를 모두 평가한다. 같은 날짜에서 서로 다른 λ가 동일한 정수 worker allocation을 만들면 DES 입력이 동일하므로 실제 DES는 한 번만 실행하고 결과를 재사용한다.
 
-`phase4_allocations.csv`에는 각 날짜/λ/zone별 `microzone_concentration`, `microzone_entropy_normalized`, `entropy_adjusted_workload`를 함께 저장한다.
+`phase4_daily_results.csv`에는 λ별 `[n1,n2,n3,n4]`, `D`, `R`, `J`, Volume 기준 이동 작업자 수를 함께 저장한다. `phase4_allocations.csv`에는 zone별 `microzone_concentration`, `microzone_entropy_normalized`, `pair_congestion_risk_contribution`을 저장한다.
+
+### 단일 날짜 정수 목적함수 진단
+
+전체 Calibration을 돌리기 전에 `2023-01-05` 하루에서 정수 배치 변화와 DES KPI를 확인할 수 있다.
+
+```powershell
+python -m entropy_thesis.simulation.phase4 --data-dir data/raw --date 2023-01-05
+```
+
+출력 순서:
+
+```text
+1. zone별 workload / workload share / C_z
+2. λ별 [n1,n2,n3,n4], D, R, J
+3. Volume 대비 실제 이동 작업자 수
+4. λ별 DES KPI
+```
+
+단일 날짜 결과는 전체 Phase 4E recommendation을 덮어쓰지 않도록 `results/phase4/diagnostic_2023-01-05/` 아래에 별도로 저장한다.
 
 ## 4. Phase 4D - λ별 날짜 평균 및 통계 비교
 

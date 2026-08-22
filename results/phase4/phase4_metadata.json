@@ -1,6 +1,6 @@
 {
   "phase": 4,
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
   "workflow": "4A_full_dates -> 4B_split -> 4C_calibration_DES -> 4D_statistics -> 4E_lambda_star",
   "input": {
     "storage_locations": 2292,
@@ -180,19 +180,20 @@
   ],
   "selected": {
     "phase": "4E",
-    "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+    "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+    "allocation_objective": "J(n;lambda)=D(n)+lambda*R(n)",
     "selection_metric": "mean_flow_time_seconds",
     "direction": "minimize",
-    "entropy_weight": 0.1,
-    "metric_mean": 440.6014757150208,
+    "entropy_weight": 0.0,
+    "metric_mean": 440.88618899625766,
     "metric_median": 372.85892379920955,
     "n_calibration_dates": 92,
     "reference_entropy_weight": 0.0,
-    "mean_improvement_vs_lambda0_pct": 0.016698115012928928,
-    "wins_vs_lambda0": 2,
-    "ties_vs_lambda0": 88,
-    "losses_vs_lambda0": 2,
-    "wilcoxon_p_value_vs_lambda0": 0.4652088184521418,
+    "mean_improvement_vs_lambda0_pct": 0.0,
+    "wins_vs_lambda0": 0,
+    "ties_vs_lambda0": 92,
+    "losses_vs_lambda0": 0,
+    "wilcoxon_p_value_vs_lambda0": 1.0,
     "calibration_dates": [
       "2023-01-05",
       "2023-01-06",
@@ -334,11 +335,14 @@
   "definitions": {
     "phase4A": "timestamp가 있고 모든 picking location이 warehouse graph에서 resolve되며 최소 list/worker 조건을 만족하는 날짜를 적합 날짜로 정의한다.",
     "phase4B": "날짜 단위로 Calibration/Holdout을 분리하며 Holdout 날짜는 Phase 4C DES에 사용하지 않는다.",
-    "phase4C": "각 날짜에서 20개 micro-zone 수요를 4개 macro-zone 내부 Shannon entropy로 요약하고 C_z=1-H_z를 계산한다. 각 λ에 대해 A_z=V_z*(1+λ*C_z) 가중치로 작업자를 배치하며, 동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다.",
+    "phase4C": "각 날짜에서 20개 micro-zone 수요를 4개 macro-zone 내부 Shannon entropy로 요약하고 C_z=1-H_z를 계산한다. 가능한 정수 worker vector n을 직접 열거하여 D(n)=0.5*Σ|n_z/N-V_z/ΣV|, R(n)=Σ C_z*C(n_z,2), J(n;λ)=D(n)+λR(n)을 최소화하며, 동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다.",
     "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
     "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
-    "lambda_zero": "λ=0이면 A_z=V_z이므로 Volume Proportional Allocation과 정확히 동일하다.",
+    "lambda_zero": "λ=0은 Phase 3 Volume Proportional의 정수 배치를 정확히 control로 사용한다.",
     "entropy_concentration": "C_z=1-H_z. H_z는 macro-zone 내부 5개 micro-zone workload의 normalized Shannon entropy이다.",
+    "D_demand_mismatch": "수요비중과 정수 작업자비중의 total-variation distance. 작을수록 Volume 배치에 가깝다.",
+    "R_congestion_risk": "같은 macro-zone에 배치된 작업자 쌍 C(n_z,2)을 해당 zone의 수요 집중도 C_z로 가중한 정수 혼잡위험 지수.",
+    "J_integer_objective": "D + lambda*R. lambda가 커질수록 수요 적합도 손실을 감수하고 집중 zone의 동시 작업자 쌍을 줄일 수 있다.",
     "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다."
   }
 }

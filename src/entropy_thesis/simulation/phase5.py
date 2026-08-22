@@ -33,7 +33,9 @@ from .phase3 import (
 from .phase4 import (
     DEFAULT_SELECTION_METRIC,
     MAXIMIZE_METRICS,
+    PHASE4_MODEL_REVISION,
     allocate_phase4_workers,
+    score_phase4_allocation,
 )
 from .progress import ConsoleProgress, format_duration
 from .warehouse import WarehouseGraph
@@ -260,11 +262,11 @@ def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
         )
 
     model_revision = str(payload.get("model_revision", ""))
-    if model_revision != THESIS_MODEL_REVISION:
+    if model_revision != PHASE4_MODEL_REVISION:
         raise ValueError(
-            "Phase 4 recommendation이 현재 물리/Zone 모델과 호환되지 않습니다. "
-            f"expected={THESIS_MODEL_REVISION!r}, found={model_revision or '<missing>'!r}. "
-            "CC-08/inch/20-micro/4-macro 수정 후 Phase 4를 다시 실행하세요."
+            "Phase 4 recommendation이 현재 물리/Zone/정수 목적함수 모델과 호환되지 않습니다. "
+            f"expected={PHASE4_MODEL_REVISION!r}, found={model_revision or '<missing>'!r}. "
+            "최신 Phase 4 정수 목적함수로 Calibration을 다시 실행하세요."
         )
 
     entropy_weight = float(payload["entropy_weight"])
@@ -673,6 +675,17 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
         method_counts.append(("entropy_based", result.entropy_worker_counts))
         for method, worker_counts in method_counts:
             total_workers = sum(worker_counts)
+            if method == "entropy_based":
+                demand_mismatch, congestion_risk, objective_value = score_phase4_allocation(
+                    worker_counts=worker_counts,
+                    workloads=result.workloads,
+                    microzone_concentrations=result.microzone_concentrations,
+                    entropy_weight=run.entropy_weight,
+                )
+            else:
+                demand_mismatch = None
+                congestion_risk = None
+                objective_value = None
             for zone, workload, concentration, workers in zip(
                 run.zones,
                 result.workloads,
@@ -680,11 +693,6 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
                 worker_counts,
                 strict=True,
             ):
-                adjusted_workload = (
-                    workload * (1.0 + run.entropy_weight * concentration)
-                    if method == "entropy_based"
-                    else workload
-                )
                 records.append(
                     {
                         "selected_date": result.selected_date.isoformat(),
@@ -697,9 +705,17 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
                         "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
                         "microzone_concentration": concentration,
                         "microzone_entropy_normalized": 1.0 - concentration,
-                        "allocation_weight": adjusted_workload,
+                        "allocation_weight": None if method == "entropy_based" else workload,
+                        "pair_congestion_risk_contribution": (
+                            concentration * math.comb(workers, 2)
+                            if method == "entropy_based"
+                            else None
+                        ),
                         "workers": workers,
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
+                        "D_demand_mismatch": demand_mismatch,
+                        "R_congestion_risk": congestion_risk,
+                        "J_objective": objective_value,
                     }
                 )
     return records
@@ -1017,7 +1033,8 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
 
     metadata = {
         "phase": 5,
-        "model_revision": THESIS_MODEL_REVISION,
+        "model_revision": PHASE4_MODEL_REVISION,
+        "physical_model_revision": THESIS_MODEL_REVISION,
         "purpose": "out-of-sample holdout validation of Baseline/Random/Equal/Volume/Entropy(lambda*)",
         "calibration_dates": [value.isoformat() for value in run.calibration_dates],
         "holdout_dates_frozen": [value.isoformat() for value in run.holdout_dates],
@@ -1032,8 +1049,9 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
             "interpretation": (
                 "lambda is selected only from Phase 4 calibration dates and held fixed across "
                 "the untouched Phase 4 holdout dates; zone worker counts are recalculated from "
-                "each holdout date's macro workload and within-macro micro-zone concentration "
-                "using A_z = V_z * (1 + lambda * C_z)"
+                "each holdout date's macro workload and within-macro micro-zone concentration by "
+                "minimizing the integer objective J(n;lambda)=D(n)+lambda*R(n), where "
+                "D=0.5*sum|n_z/N-V_z/sum(V)| and R=sum C_z*choose(n_z,2)."
             ),
         },
         "input": {

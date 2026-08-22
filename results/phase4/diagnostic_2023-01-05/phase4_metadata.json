@@ -1,0 +1,55 @@
+{
+  "phase": "4-diagnostic",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+  "selected_date": "2023-01-05",
+  "parameters": {
+    "selection_metric": "mean_flow_time_seconds",
+    "target_date": "2023-01-05",
+    "max_lists": null,
+    "zones": 4,
+    "workers": null,
+    "volume_basis": "tasks",
+    "minimum_per_active_zone": 1,
+    "entropy_weights": [
+      0.0,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      2.0,
+      4.0,
+      8.0
+    ],
+    "seed": 42,
+    "walking_speed_mps": 1.2,
+    "pick_seconds_per_unit": 3.0,
+    "edge_capacity": 1,
+    "pick_node_capacity": 1,
+    "sample_seconds": 5.0,
+    "return_to_io": true
+  },
+  "definitions": {
+    "integer_objective": "J(n;lambda) = D(n) + lambda * R(n)",
+    "D": "0.5 * sum_z |n_z/N - V_z/sum(V)|",
+    "R": "sum_z (1-H_z) * choose(n_z, 2)",
+    "lambda_zero": "lambda=0 uses the exact Phase-3 Volume Proportional integer allocation",
+    "movement": "0.5 * L1 distance from the lambda=0 worker-count vector"
+  },
+  "input": {
+    "storage_locations": 2292,
+    "support_points": 44,
+    "fully_resolvable_lists_total": 7402,
+    "selected_lists": 85,
+    "observed_workers": 8
+  },
+  "demand_entropy": {
+    "warehouse_pick_nodes": 466,
+    "demand_nodes_used": 242,
+    "task_entropy_bits": 7.332787711580227,
+    "task_entropy_normalized": 0.8272375593107787,
+    "unit_entropy_bits": 7.332787711580227,
+    "unit_entropy_normalized": 0.8272375593107787
+  }
+}

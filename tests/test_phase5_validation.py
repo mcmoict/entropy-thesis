@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from entropy_thesis.simulation.phase4 import PHASE4_MODEL_REVISION
 from entropy_thesis.simulation.phase5 import (
     _baseline_zone_projection,
     _evenly_spaced_dates,
@@ -150,7 +151,7 @@ def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:
     path.write_text(
         """{
   "phase": "4E",
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
   "selection_metric": "mean_flow_time_seconds",
   "entropy_weight": 0.05,
   "calibration_dates": ["2023-01-05", "2023-01-06"],
@@ -160,6 +161,7 @@ def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:
         encoding="utf-8",
     )
     assert THESIS_MODEL_REVISION == "2026-08-22-cc08-inch-micro20-macro4"
+    assert PHASE4_MODEL_REVISION == "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1"
     spec = load_phase4_holdout_spec(path)
     assert spec.entropy_weight == pytest.approx(0.05)
     assert spec.calibration_dates == (date(2023, 1, 5), date(2023, 1, 6))
@@ -190,7 +192,7 @@ def test_load_phase4_holdout_spec_rejects_overlap(tmp_path) -> None:
     path.write_text(
         """{
   "phase": "4E",
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
   "selection_metric": "mean_flow_time_seconds",
   "entropy_weight": 0.05,
   "calibration_dates": ["2023-01-05"],

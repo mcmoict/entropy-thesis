@@ -30,5 +30,6 @@ def test_demand_entropy_reflects_pick_node_dispersion():
     dispersed_metrics, _ = calculate_demand_entropy(warehouse, dispersed)
     concentrated_metrics, _ = calculate_demand_entropy(warehouse, concentrated)
 
-    assert dispersed_metrics.task_entropy_normalized == 1.0
+    # Normalization uses all warehouse pick nodes (4), not only the 2 demand-used nodes.
+    assert dispersed_metrics.task_entropy_normalized == 0.5
     assert concentrated_metrics.task_entropy_normalized == 0.0

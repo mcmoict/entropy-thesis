@@ -27,7 +27,7 @@ def test_phase4_lambda_zero_matches_phase3_volume_proportional() -> None:
     assert phase4 == phase3
 
 
-def test_phase4_entropy_weight_prioritizes_spatially_concentrated_macrozone() -> None:
+def test_phase4_entropy_weight_avoids_worker_pairs_in_concentrated_macrozone() -> None:
     low_lambda = allocate_phase4_workers(
         total_workers=100,
         workloads=(50.0, 50.0),
@@ -43,8 +43,29 @@ def test_phase4_entropy_weight_prioritizes_spatially_concentrated_macrozone() ->
         minimum_per_active_zone=1,
     )
     assert low_lambda == (50, 50)
-    assert high_lambda[1] > high_lambda[0]
+    assert high_lambda[1] < high_lambda[0]
     assert sum(high_lambda) == 100
+
+
+def test_integer_objective_moves_one_worker_for_2023_01_05_profile() -> None:
+    candidates = build_entropy_candidates(
+        total_workers=8,
+        workloads=(822.0, 417.0, 254.0, 503.0),
+        microzone_concentrations=(0.073863, 0.175485, 0.098158, 0.411893),
+        entropy_weights=(0.0, 0.25, 0.5, 1.0),
+        minimum_per_active_zone=1,
+    )
+
+    by_lambda = {candidate.entropy_weight: candidate for candidate in candidates}
+    assert by_lambda[0.0].worker_counts == (3, 2, 1, 2)
+    assert by_lambda[0.25].worker_counts == (3, 2, 1, 2)
+    assert by_lambda[0.5].worker_counts == (3, 2, 2, 1)
+    assert by_lambda[0.5].moved_workers_from_volume == 1
+    assert by_lambda[0.5].congestion_risk < by_lambda[0.0].congestion_risk
+    assert by_lambda[0.5].demand_mismatch > by_lambda[0.0].demand_mismatch
+    assert by_lambda[0.5].objective_value < (
+        by_lambda[0.0].demand_mismatch + 0.5 * by_lambda[0.0].congestion_risk
+    )
 
 
 def test_phase4_keeps_zero_workload_zone_at_zero() -> None:

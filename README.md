@@ -10,15 +10,21 @@ Shannon entropy로 물류센터 피킹 작업자의 공간적 집중과 혼잡�
 - 수요 공간: **20 micro-zones** = LC-08~17 + RC-08~17
 - 인력 배치 공간: **4 macro-zones** = Left/Right × Near/Far
 - Phase 3 비교: Observed Baseline / Random / Equal / Volume Proportional
-- Phase 4 제안법: macro workload에 micro-zone 수요 집중도 `C_z = 1 - H_z`를 반영
+- Phase 4 제안법: 가능한 **정수 작업자 배치**를 직접 평가하는 entropy-aware objective
 
 ```text
-A_z(lambda) = V_z * (1 + lambda * C_z)
+d_z = V_z / ΣV_z
+p_z = n_z / N
+D(n) = 0.5 × Σ |p_z - d_z|
+R(n) = Σ (1 - H_z) × C(n_z, 2)
+J(n; lambda) = D(n) + lambda × R(n)
 ```
 
-`lambda=0`이면 Volume Proportional과 동일하고, λ가 증가하면 내부 수요가 더 집중된 macro-zone의 배치 가중치가 커진다. 최적 λ*는 Calibration 날짜에서 선택하고 Phase 5의 Frozen Holdout에서는 재보정하지 않는다.
+`lambda=0`이면 Phase 3의 Volume Proportional 정수 배치를 정확한 control로 사용한다. λ가 증가하면 수요 적합도 `D`와 집중 zone의 동시 작업자 쌍 위험 `R` 사이의 trade-off에 따라 작업자 1명의 실제 zone 이동이 발생할 수 있다. 최적 λ*는 Calibration 날짜에서 선택하고 Phase 5의 Frozen Holdout에서는 재보정하지 않는다.
 
-> `entropy_thesis.allocation.entropy_based_allocation`에는 초기 합성실험용 entropy-regularization 함수가 남아 있지만, **실제 데이터 Phase 4/5의 제안 방법은 위 micro-zone concentration 공식**을 사용한다.
+> `entropy_thesis.allocation.entropy_based_allocation`에는 초기 합성실험용 entropy-regularization 함수가 남아 있지만, **실제 데이터 Phase 4/5의 제안 방법은 위 정수 목적함수**를 사용한다.
+
+상세 개정 내역과 `2023-01-05` PRE-DES/DES 검증값은 `PHASE4_INTEGER_OBJECTIVE_20260823.md`를 참조한다.
 
 ## 환경 구성
 
