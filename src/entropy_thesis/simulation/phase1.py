@@ -7,7 +7,13 @@ from pathlib import Path
 
 import simpy
 
-from .data_loader import DatasetBundle, PickingList, load_dataset
+from .data_loader import (
+    DEFAULT_COORDINATE_UNIT,
+    DatasetBundle,
+    PickingList,
+    coordinate_scale_to_meter,
+    load_dataset,
+)
 from .warehouse import WarehouseGraph
 from .worker import Worker, create_workers_from_picking_lists
 
@@ -19,6 +25,7 @@ class Phase1Audit:
     resolved_pick_tasks: int
     unresolved_pick_tasks: int
     fully_resolvable_lists: int
+    picking_level_above_2_tasks: int
     unresolved_locations: tuple[tuple[str, int], ...]
 
     @property
@@ -36,6 +43,7 @@ def audit_picking_locations(
     resolved = 0
     fully_resolvable = 0
     unresolved_counter: Counter[str] = Counter()
+    level_above_2_tasks = 0
 
     for picking_list in picking_lists:
         list_ok = True
@@ -43,6 +51,8 @@ def audit_picking_locations(
             total += 1
             if warehouse.has_location(task.location_id):
                 resolved += 1
+                if warehouse.storage_by_id[task.location_id].level > 2:
+                    level_above_2_tasks += 1
             else:
                 list_ok = False
                 unresolved_counter[task.location_id] += 1
@@ -55,6 +65,7 @@ def audit_picking_locations(
         resolved_pick_tasks=resolved,
         unresolved_pick_tasks=total - resolved,
         fully_resolvable_lists=fully_resolvable,
+        picking_level_above_2_tasks=level_above_2_tasks,
         unresolved_locations=tuple(unresolved_counter.most_common()),
     )
 
@@ -133,14 +144,23 @@ def main() -> None:
     print(f"Navigation nodes  : {stats.navigation_nodes:,}")
     print(f"Navigation edges  : {stats.navigation_edges:,}")
     print(f"Components        : {stats.connected_components}")
-    print(f"Default I/O node  : {warehouse.default_start_node()}")
+    io_node = warehouse.default_start_node()
+    io_attrs = warehouse.graph.nodes[io_node]
+    print(f"Default I/O node  : {io_node}")
+    print(f"I/O coordinate(m) : ({io_attrs['x_m']:.4f}, {io_attrs['y_m']:.4f})")
+    print(f"Source coord unit : {DEFAULT_COORDINATE_UNIT}")
+    print(f"Scale to meter    : {coordinate_scale_to_meter(DEFAULT_COORDINATE_UNIT):.4f}")
     print()
     print("=== Picking Location Audit ===")
     print(f"Pick tasks        : {audit.pick_tasks:,}")
     print(f"Resolved          : {audit.resolved_pick_tasks:,}")
     print(f"Unresolved        : {audit.unresolved_pick_tasks:,}")
     print(f"Resolution rate   : {audit.resolution_rate:.2%}")
+    excluded_lists = audit.picking_lists - audit.fully_resolvable_lists
+    exclusion_rate = 0.0 if audit.picking_lists == 0 else excluded_lists / audit.picking_lists
     print(f"Fully valid lists : {audit.fully_resolvable_lists:,}/{audit.picking_lists:,}")
+    print(f"Excluded lists    : {excluded_lists:,} ({exclusion_rate:.2%})")
+    print(f"Level > 2 tasks   : {audit.picking_level_above_2_tasks:,}")
     print("Top unresolved    :", audit.unresolved_locations[:10])
     print()
 

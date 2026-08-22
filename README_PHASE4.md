@@ -84,54 +84,41 @@ python -m entropy_thesis.simulation.phase4 --data-dir data/raw --split-strategy 
 
 ## 3. Phase 4C - Calibration 날짜 × λ 후보 전체 DES
 
-엔트로피 기반 배치식은 기존 Phase 4와 동일하다.
+Phase 4의 제안 방식은 **4개 macro-zone의 총 물동량**과 **각 macro-zone 내부 5개 micro-zone의 공간적 집중도**를 함께 사용한다.
+
+macro-zone `z` 내부 micro-zone workload를 `v_zj`라고 하면 normalized Shannon entropy를 계산한다.
 
 ```text
-min  KL(p || d) - λ H(p)
+H_z = normalized Shannon entropy(v_z1, ..., v_z5)
+C_z = 1 - H_z
 ```
 
-closed form:
+`C_z`는 0~1 범위의 수요 집중도이다. 5개 micro-zone에 수요가 고르게 퍼질수록 0에 가깝고, 한두 micro-zone에 집중될수록 1에 가까워진다.
+
+Picking list를 dominant macro-zone으로 귀속해 계산한 macro workload를 `V_z`라고 할 때 λ 후보별 배치 가중치는 다음과 같다.
 
 ```text
-p_i ∝ d_i ** (1 / (1 + λ))
+A_z(lambda) = V_z * (1 + lambda * C_z)
 ```
 
-해석:
+작업자 수는 `A_z(lambda)`에 비례하여 water-filling + largest-remainder 방식으로 정수 배정한다.
 
 ```text
-λ = 0       -> Volume Proportional Allocation
-λ 증가      -> 작업자 분포가 점점 평탄화
-λ -> 큼     -> 활성 zone 사이 Equal Allocation에 접근
+lambda = 0  -> 정확히 Volume Proportional Allocation
+lambda 증가 -> 같은 물동량이라도 내부 micro-zone 수요가 더 집중된 macro-zone에 추가 가중치
 ```
 
-기본 λ 후보는 다음과 같이 촘촘하게 변경했다.
+즉 이전의 “λ가 커질수록 Equal Allocation으로 평탄화”하는 엔트로피 정규화가 아니라, **국소 수요 집중도를 인력배치 가중치에 반영하는 entropy-aware allocation**으로 변경되었다.
+
+기본 λ 후보는 다음과 같다.
 
 ```text
 0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8
 ```
 
-각 Calibration 날짜마다 위 λ 후보를 모두 평가한다.
+각 Calibration 날짜마다 위 λ 후보를 모두 평가한다. 같은 날짜에서 서로 다른 λ가 동일한 정수 worker allocation을 만들면 DES 입력이 동일하므로 실제 DES는 한 번만 실행하고 결과를 재사용한다.
 
-```text
-Calibration Date 1 × λ 10개
-Calibration Date 2 × λ 10개
-...
-Calibration Date N × λ 10개
-```
-
-단, **같은 날짜에서 서로 다른 λ가 동일한 정수 worker allocation을 만들면 DES 입력이 완전히 동일**하므로 실제 DES는 한 번만 실행하고 결과를 재사용한다. λ 후보 자체는 결과표에 모두 남는다.
-
-일별 λ 결과:
-
-```text
-results/phase4/phase4_daily_results.csv
-```
-
-zone별 배치:
-
-```text
-results/phase4/phase4_allocations.csv
-```
+`phase4_allocations.csv`에는 각 날짜/λ/zone별 `microzone_concentration`, `microzone_entropy_normalized`, `entropy_adjusted_workload`를 함께 저장한다.
 
 ## 4. Phase 4D - λ별 날짜 평균 및 통계 비교
 

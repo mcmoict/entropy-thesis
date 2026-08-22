@@ -729,6 +729,12 @@ def main() -> None:
 
     metadata = {
         "phase": 2,
+        "physical_model": {
+            "source_coordinate_unit": "inch",
+            "coordinate_scale_to_meter": 0.0254,
+            "default_io_node": warehouse.default_start_node(),
+            "default_io_label": "CC-08",
+        },
         "selected_date": selected_date.isoformat(),
         "origin_timestamp": origin.isoformat(),
         "input": {

@@ -14,6 +14,8 @@ Baseline / Random / Equal / Volume Proportional / Entropy(λ*)
 
 ```text
 results/phase4/phase4_recommendation.json
+
+> 2026-08-22 모델 정정 이후 Phase 5는 recommendation의 `model_revision`을 검사한다. CC-01/cm 또는 이전 Zone 모델에서 생성된 recommendation은 자동 거부되므로 **Phase 4를 먼저 전부 재실행**해야 한다.
 ```
 
 이 파일에서 다음 값을 동시에 불러온다.
@@ -133,7 +135,7 @@ baseline            : Picking_Wave.csv의 원본 operator -> picking-list 배정
 random              : 활성 Zone 최소 인원 + 잔여 인원 seed 기반 무작위 배치
 equal               : 활성 Zone에 가능한 균등 배치
 volume_proportional : 날짜별 Zone workload 비율에 비례 배치
-entropy_based       : 고정 λ*를 적용한 entropy-regularized workload 배치
+entropy_based       : 고정 λ*로 macro workload × (1 + λ* × micro-zone concentration)을 적용한 배치
 
 === Worker Allocation | Holdout Mean by Zone (40 dates) ===
 Zone   Workload(%)   Baseline*   Random   Equal   Volume   Entropy   Baseline touch**

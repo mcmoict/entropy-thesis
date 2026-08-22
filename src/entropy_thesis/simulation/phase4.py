@@ -19,12 +19,14 @@ from .phase1 import Phase1Audit, audit_picking_locations
 from .phase2 import DemandEntropyMetrics, calculate_demand_entropy, select_phase2_lists
 from .phase3 import (
     AisleZone,
+    THESIS_MODEL_REVISION,
     Phase3MethodResult,
     PickingListZoneAssignment,
     _congestion_records,
     _worker_records,
     build_aisle_zones,
     classify_picking_lists_by_zone,
+    macro_zone_demand_profiles,
     run_phase3_method,
     zone_workload,
 )
@@ -93,12 +95,20 @@ def allocate_phase4_workers(
     total_workers: int,
     workloads: Iterable[float],
     entropy_weight: float,
+    microzone_concentrations: Iterable[float] | None = None,
     minimum_per_active_zone: int = 1,
 ) -> tuple[int, ...]:
-    """Allocate workers to active zones using entropy regularization.
+    """Allocate workers using macro workload plus within-zone demand concentration.
 
-    Zero-demand zones remain at zero, matching the Phase 3 fairness rule.
-    Within active zones, lambda=0 is exactly volume-proportional allocation.
+    For macro-zone ``z`` the adjusted allocation weight is
+
+        adjusted_z = workload_z * (1 + lambda * concentration_z)
+
+    where ``concentration_z = 1 - H_z`` and ``H_z`` is normalized Shannon
+    entropy of the five micro-zone workloads inside that macro-zone.  Thus
+    ``lambda=0`` is exactly Phase-3 volume proportional allocation. Positive
+    lambda gives additional weight to macro-zones whose demand is spatially
+    concentrated, which is the proposed entropy-aware mechanism.
     """
 
     if isinstance(total_workers, bool) or not isinstance(total_workers, int):
@@ -122,6 +132,18 @@ def allocate_phase4_workers(
     if any(not math.isfinite(value) or value < 0.0 for value in values):
         raise ValueError("workloads는 0 이상의 유한한 수여야 합니다.")
 
+    if microzone_concentrations is None:
+        concentrations = (0.0,) * len(values)
+    else:
+        concentrations = tuple(float(value) for value in microzone_concentrations)
+        if len(concentrations) != len(values):
+            raise ValueError("microzone_concentrations와 workloads 길이가 다릅니다.")
+        if any(
+            not math.isfinite(value) or value < 0.0 or value > 1.0
+            for value in concentrations
+        ):
+            raise ValueError("microzone_concentrations는 0~1 범위의 유한한 값이어야 합니다.")
+
     active_indices = [index for index, value in enumerate(values) if value > 0.0]
     if not active_indices:
         raise ValueError("양의 workload를 가진 zone이 없습니다.")
@@ -133,11 +155,14 @@ def allocate_phase4_workers(
             f"minimum={minimum_per_active_zone}"
         )
 
+    adjusted = [
+        values[index] * (1.0 + regularization * concentrations[index])
+        for index in active_indices
+    ]
     active_counts = allocate_workers(
-        "entropy_based",
+        "volume_proportional",
         total_workers,
-        [values[index] for index in active_indices],
-        entropy_weight=regularization,
+        adjusted,
         minimum_per_zone=minimum_per_active_zone,
     )
     result = [0] * len(values)
@@ -145,12 +170,12 @@ def allocate_phase4_workers(
         result[index] = int(count)
     return tuple(result)
 
-
 def build_entropy_candidates(
     *,
     total_workers: int,
     workloads: Iterable[float],
     entropy_weights: Iterable[float] = DEFAULT_ENTROPY_WEIGHTS,
+    microzone_concentrations: Iterable[float] | None = None,
     minimum_per_active_zone: int = 1,
 ) -> tuple[EntropyAllocationCandidate, ...]:
     """Create lambda candidates and mark duplicate integer allocations.
@@ -168,6 +193,7 @@ def build_entropy_candidates(
             total_workers=total_workers,
             workloads=workload_values,
             entropy_weight=entropy_weight,
+            microzone_concentrations=microzone_concentrations,
             minimum_per_active_zone=minimum_per_active_zone,
         )
         if counts not in allocation_ids:
@@ -473,10 +499,16 @@ def build_and_run_phase4(
         max_lists=max_lists,
     )
     if progress is not None:
-        progress.report(0.17, "Building physical aisle zones")
+        progress.report(0.17, "Building 20 demand micro-zones / 4 workforce macro-zones")
     zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
     assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
     workloads = zone_workload(zones, assignments, basis=volume_basis)
+    macro_profiles = macro_zone_demand_profiles(
+        warehouse, selected_lists, zones, basis=volume_basis
+    )
+    microzone_concentrations = tuple(
+        profile.microzone_concentration for profile in macro_profiles
+    )
     demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
 
     inferred_workers = len({p.operator for p in selected_lists})
@@ -488,6 +520,7 @@ def build_and_run_phase4(
         total_workers=workers_to_use,
         workloads=workloads,
         entropy_weights=entropy_weights,
+        microzone_concentrations=microzone_concentrations,
         minimum_per_active_zone=minimum_per_active_zone,
     )
     unique_candidates: dict[str, EntropyAllocationCandidate] = {}
@@ -618,6 +651,7 @@ class Phase4CalibrationDateResult:
     picking_lists: tuple[PickingList, ...]
     assignments: tuple[PickingListZoneAssignment, ...]
     workloads: tuple[float, ...]
+    microzone_concentrations: tuple[float, ...]
     demand_entropy: DemandEntropyMetrics
     observed_workers: int
     effective_workers: int
@@ -790,6 +824,12 @@ def _run_phase4_calibration_date(
 ) -> Phase4CalibrationDateResult:
     assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
     workloads = zone_workload(zones, assignments, basis=volume_basis)
+    macro_profiles = macro_zone_demand_profiles(
+        warehouse, selected_lists, zones, basis=volume_basis
+    )
+    microzone_concentrations = tuple(
+        profile.microzone_concentration for profile in macro_profiles
+    )
     demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
     observed_workers = len({item.operator for item in selected_lists})
     effective_workers = observed_workers if total_workers is None else total_workers
@@ -798,6 +838,7 @@ def _run_phase4_calibration_date(
         total_workers=effective_workers,
         workloads=workloads,
         entropy_weights=entropy_weights,
+        microzone_concentrations=microzone_concentrations,
         minimum_per_active_zone=minimum_per_active_zone,
     )
     unique_candidates: dict[str, EntropyAllocationCandidate] = {}
@@ -876,6 +917,7 @@ def _run_phase4_calibration_date(
         picking_lists=tuple(selected_lists),
         assignments=assignments,
         workloads=workloads,
+        microzone_concentrations=microzone_concentrations,
         demand_entropy=demand_entropy,
         observed_workers=observed_workers,
         effective_workers=effective_workers,
@@ -911,20 +953,29 @@ def phase4_allocation_records(run: Phase4MultiDateRun) -> list[dict[str, object]
         total_workload = sum(date_result.workloads)
         for item in date_result.results:
             total_workers = sum(item.candidate.worker_counts)
-            for zone, workload, workers in zip(
+            for zone, workload, concentration, workers in zip(
                 run.zones,
                 date_result.workloads,
+                date_result.microzone_concentrations,
                 item.candidate.worker_counts,
                 strict=True,
             ):
+                adjusted_workload = workload * (
+                    1.0 + item.candidate.entropy_weight * concentration
+                )
                 records.append(
                     {
                         "selected_date": date_result.selected_date.isoformat(),
                         "entropy_weight": item.candidate.entropy_weight,
                         "allocation_id": item.candidate.allocation_id,
                         "zone_id": zone.zone_id,
+                        "side": zone.side,
+                        "support_labels": "|".join(zone.support_labels),
                         "workload": workload,
                         "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
+                        "microzone_concentration": concentration,
+                        "microzone_entropy_normalized": 1.0 - concentration,
+                        "entropy_adjusted_workload": adjusted_workload,
                         "workers": workers,
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
                     }
@@ -1092,7 +1143,7 @@ def build_and_run_phase4_multidate(
     )
     audit = audit_picking_locations(warehouse, dataset.picking_lists)
     if progress is not None:
-        progress.report(0.09, "Phase 4A | Building physical aisle zones")
+        progress.report(0.09, "Phase 4A | Building 20 demand micro-zones / 4 workforce macro-zones")
     zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
     profiles, selected_by_date = extract_phase4_date_profiles(
         warehouse,
@@ -1225,6 +1276,7 @@ def write_phase4_multidate_results(
     ].iloc[0]
     recommendation = {
         "phase": "4E",
+        "model_revision": THESIS_MODEL_REVISION,
         "selection_metric": run.selection_metric,
         "direction": "maximize" if run.selection_metric in MAXIMIZE_METRICS else "minimize",
         "entropy_weight": run.selected_entropy_weight,
@@ -1250,6 +1302,7 @@ def write_phase4_multidate_results(
 
     metadata = {
         "phase": 4,
+        "model_revision": THESIS_MODEL_REVISION,
         "workflow": "4A_full_dates -> 4B_split -> 4C_calibration_DES -> 4D_statistics -> 4E_lambda_star",
         "input": {
             "storage_locations": len(run.dataset.storage_locations),
@@ -1268,10 +1321,15 @@ def write_phase4_multidate_results(
         "definitions": {
             "phase4A": "timestamp가 있고 모든 picking location이 warehouse graph에서 resolve되며 최소 list/worker 조건을 만족하는 날짜를 적합 날짜로 정의한다.",
             "phase4B": "날짜 단위로 Calibration/Holdout을 분리하며 Holdout 날짜는 Phase 4C DES에 사용하지 않는다.",
-            "phase4C": "Calibration 각 날짜에서 모든 λ 후보를 평가한다. 같은 날짜에서 동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다.",
+            "phase4C": (
+                "각 날짜에서 20개 micro-zone 수요를 4개 macro-zone 내부 Shannon entropy로 요약하고 "
+                "C_z=1-H_z를 계산한다. 각 λ에 대해 A_z=V_z*(1+λ*C_z) 가중치로 작업자를 배치하며, "
+                "동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다."
+            ),
             "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
             "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
-            "lambda_zero": "λ=0은 Volume Proportional Allocation과 동일하다.",
+            "lambda_zero": "λ=0이면 A_z=V_z이므로 Volume Proportional Allocation과 정확히 동일하다.",
+            "entropy_concentration": "C_z=1-H_z. H_z는 macro-zone 내부 5개 micro-zone workload의 normalized Shannon entropy이다.",
             "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다.",
         },
     }

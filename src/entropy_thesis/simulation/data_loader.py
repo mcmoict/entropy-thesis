@@ -8,7 +8,8 @@ from typing import Callable, Iterable, Literal
 import pandas as pd
 
 
-CoordinateUnit = Literal["centimeter", "meter"]
+CoordinateUnit = Literal["inch", "centimeter", "meter"]
+DEFAULT_COORDINATE_UNIT: CoordinateUnit = "inch"
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,11 @@ def _to_optional_float(value: object) -> float | None:
         return None
 
 
-def _coordinate_scale(coordinate_unit: CoordinateUnit) -> float:
+def coordinate_scale_to_meter(coordinate_unit: CoordinateUnit) -> float:
+    """Return the multiplier that converts the source coordinate unit to metres."""
+
+    if coordinate_unit == "inch":
+        return 0.0254
     if coordinate_unit == "centimeter":
         return 0.01
     if coordinate_unit == "meter":
@@ -187,16 +192,17 @@ def _parse_coordinate(value: object) -> tuple[float, float, float]:
 def load_storage_locations(
     path: str | Path,
     *,
-    coordinate_unit: CoordinateUnit = "centimeter",
+    coordinate_unit: CoordinateUnit = DEFAULT_COORDINATE_UNIT,
 ) -> list[StorageLocation]:
     """실제 Storage_Location.csv 스키마를 읽는다.
 
     expected columns:
       originalLocation, position, x, y, z
 
-    이 데이터셋의 평면 좌표는 CAD 기반 숫자이며 66, 403, 1471과 같은 값이다.
-    기본값은 cm -> m(0.01 배율)로 변환한다. 원본이 이미 m라고 판단하는 경우
-    coordinate_unit="meter"로 실행하면 된다.
+    이 데이터셋의 평면 좌표는 CAD 기반 inch 단위이다. 예를 들어 원본 레이아웃의
+    15 coordinate units는 15 inch = 0.381 m와 일치한다. 따라서 기본값은
+    inch -> m(0.0254 배율)로 변환한다. 비교/감사용으로 centimeter 또는 meter를
+    명시적으로 지정할 수도 있다.
     """
 
     df = _read_csv(path, sep=",")
@@ -205,7 +211,7 @@ def load_storage_locations(
     if missing:
         raise ValueError(f"Storage_Location.csv 필수 컬럼 누락: {sorted(missing)}")
 
-    scale = _coordinate_scale(coordinate_unit)
+    scale = coordinate_scale_to_meter(coordinate_unit)
     result: list[StorageLocation] = []
     for row in df.itertuples(index=False):
         location_id = _normalize_text(getattr(row, "originalLocation"))
@@ -232,7 +238,7 @@ def load_storage_locations(
 def load_support_points(
     path: str | Path,
     *,
-    coordinate_unit: CoordinateUnit = "centimeter",
+    coordinate_unit: CoordinateUnit = DEFAULT_COORDINATE_UNIT,
 ) -> list[SupportPoint]:
     """실제 Support_Points_Navigation.csv 스키마를 읽는다.
 
@@ -248,7 +254,7 @@ def load_support_points(
             f"Support_Points_Navigation.csv 필수 컬럼 누락: {sorted(missing)}"
         )
 
-    scale = _coordinate_scale(coordinate_unit)
+    scale = coordinate_scale_to_meter(coordinate_unit)
     result: list[SupportPoint] = []
     for row in df.itertuples(index=False):
         label = _normalize_text(getattr(row, "labels"))
@@ -433,7 +439,7 @@ def load_picking_lists(
 def load_dataset(
     data_dir: str | Path,
     *,
-    coordinate_unit: CoordinateUnit = "centimeter",
+    coordinate_unit: CoordinateUnit = DEFAULT_COORDINATE_UNIT,
     progress_callback: Callable[[str, int, int, Path], None] | None = None,
 ) -> DatasetBundle:
     """사용자가 업로드한 5개 CSV를 한 번에 읽는 편의 함수.

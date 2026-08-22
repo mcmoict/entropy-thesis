@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from entropy_thesis.simulation.data_loader import (
     load_picking_lists,
@@ -16,7 +17,7 @@ def test_actual_storage_schema(tmp_path: Path):
     ).to_csv(path, index=False)
     rows = load_storage_locations(path)
     assert rows[0].location_id == "A-14-11"
-    assert rows[0].x_m == 3.68
+    assert rows[0].x_m == pytest.approx(9.3472)
     assert rows[0].level == 1
 
 
@@ -30,7 +31,7 @@ def test_actual_support_schema(tmp_path: Path):
     ).to_csv(path, sep=";", index=False)
     rows = load_support_points(path)
     assert rows[0].point_id == "SUP:LC-01"
-    assert rows[1].x_m == 4.03
+    assert rows[1].x_m == pytest.approx(10.2362)
 
 
 def test_picking_list_is_split_by_operator_and_preserves_order(tmp_path: Path):

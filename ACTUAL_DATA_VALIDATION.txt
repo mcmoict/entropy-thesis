@@ -1,3 +1,10 @@
+MODEL REVISION NOTICE (2026-08-22)
+=================================
+This file contains pre-revision validation output and MUST NOT be cited as a current result.
+The physical/model assumptions were corrected to: depot=CC-08, source coordinates=inch (x0.0254 m),
+20 demand micro-zones (LC/RC-08..17), and 4 workforce macro-zones.
+Re-run Phase 1~5 and replace the values below before thesis reporting.
+
 Phase 1 actual uploaded CSV validation
 =====================================
 

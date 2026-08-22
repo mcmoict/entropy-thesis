@@ -1,5 +1,6 @@
 {
   "phase": 5,
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
   "purpose": "out-of-sample holdout validation of Baseline/Random/Equal/Volume/Entropy(lambda*)",
   "calibration_dates": [
     "2023-01-05",
@@ -223,11 +224,11 @@
   ],
   "holdout_dates_skipped": [],
   "entropy": {
-    "weight": 0.05,
+    "weight": 0.1,
     "source": "phase4_recommendation:results\\phase4\\phase4_recommendation.json",
     "selection_metric": "mean_flow_time_seconds",
     "fixed_across_holdout_dates": true,
-    "interpretation": "lambda is selected only from Phase 4 calibration dates and held fixed across the untouched Phase 4 holdout dates; zone worker counts are recalculated from each holdout date's workload distribution"
+    "interpretation": "lambda is selected only from Phase 4 calibration dates and held fixed across the untouched Phase 4 holdout dates; zone worker counts are recalculated from each holdout date's macro workload and within-macro micro-zone concentration using A_z = V_z * (1 + lambda * C_z)"
   },
   "input": {
     "storage_locations": 2292,

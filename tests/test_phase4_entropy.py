@@ -7,7 +7,6 @@ from entropy_thesis.simulation.phase4 import (
     allocate_phase4_workers,
     build_entropy_candidates,
 )
-from entropy_thesis.entropy import normalized_shannon_entropy
 
 
 def test_phase4_lambda_zero_matches_phase3_volume_proportional() -> None:
@@ -22,25 +21,29 @@ def test_phase4_lambda_zero_matches_phase3_volume_proportional() -> None:
         total_workers=12,
         workloads=workloads,
         entropy_weight=0.0,
+        microzone_concentrations=(0.0, 0.2, 0.8, 0.5),
         minimum_per_active_zone=1,
     )
     assert phase4 == phase3
 
 
-def test_phase4_entropy_weight_flattens_active_zone_worker_distribution() -> None:
+def test_phase4_entropy_weight_prioritizes_spatially_concentrated_macrozone() -> None:
     low_lambda = allocate_phase4_workers(
         total_workers=100,
-        workloads=(90.0, 9.0, 1.0),
+        workloads=(50.0, 50.0),
         entropy_weight=0.0,
+        microzone_concentrations=(0.0, 1.0),
         minimum_per_active_zone=1,
     )
     high_lambda = allocate_phase4_workers(
         total_workers=100,
-        workloads=(90.0, 9.0, 1.0),
+        workloads=(50.0, 50.0),
         entropy_weight=4.0,
+        microzone_concentrations=(0.0, 1.0),
         minimum_per_active_zone=1,
     )
-    assert normalized_shannon_entropy(high_lambda) > normalized_shannon_entropy(low_lambda)
+    assert low_lambda == (50, 50)
+    assert high_lambda[1] > high_lambda[0]
     assert sum(high_lambda) == 100
 
 
@@ -49,6 +52,7 @@ def test_phase4_keeps_zero_workload_zone_at_zero() -> None:
         total_workers=8,
         workloads=(20.0, 0.0, 10.0, 0.0),
         entropy_weight=2.0,
+        microzone_concentrations=(0.2, 0.0, 0.8, 0.0),
         minimum_per_active_zone=1,
     )
     assert allocation[1] == 0

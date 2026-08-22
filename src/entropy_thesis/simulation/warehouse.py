@@ -200,20 +200,21 @@ class WarehouseGraph:
         return resolved.node_id
 
     def default_start_node(self) -> str:
-        """Phase 1 기본 I/O 지점.
+        """Return the dataset-defined single picker I/O (CC-08).
 
-        데이터 논문은 Warehouse I/O를 central hub로 설명한다. 데이터에 명시적인
-        I/O label은 없으므로 중앙 corridor의 최하단 CC-01을 우선 사용한다.
+        The source warehouse layout marks CC-08 as the common depot / entrance used
+        by every picker at the start and end of a picking tour.  This is a model
+        invariant, so silently falling back to another support point would change
+        route distances and congestion semantics.
         """
 
-        if "CC-01" in self.support_nodes:
-            return self.support_nodes["CC-01"]
-        if "LC-01" in self.support_nodes:
-            return self.support_nodes["LC-01"]
-        return min(
-            self.support_nodes.values(),
-            key=lambda node: (self.graph.nodes[node]["y_m"], self.graph.nodes[node]["x_m"]),
-        )
+        try:
+            return self.support_nodes["CC-08"]
+        except KeyError as exc:
+            raise ValueError(
+                "필수 I/O support point CC-08이 없습니다. "
+                "이 데이터셋 시뮬레이션은 CC-08을 단일 출발/종료 depot으로 사용합니다."
+            ) from exc
 
     def shortest_route(self, start_node: str, end_node: str) -> Route:
         nodes = nx.shortest_path(self.graph, start_node, end_node, weight="weight")

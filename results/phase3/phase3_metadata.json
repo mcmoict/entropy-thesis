@@ -1,5 +1,12 @@
 {
   "phase": 3,
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+  "physical_model": {
+    "source_coordinate_unit": "inch",
+    "coordinate_scale_to_meter": 0.0254,
+    "default_io_node": "SUP:CC-08",
+    "default_io_label": "CC-08"
+  },
   "selected_date": "2023-01-05",
   "origin_timestamp": "2023-01-05T07:42:00",
   "input": {
@@ -17,6 +24,7 @@
       "volume_proportional"
     ],
     "zones": 4,
+    "demand_microzones": 20,
     "workers": null,
     "effective_workers": 8,
     "volume_basis": "tasks",
@@ -33,72 +41,135 @@
   "zones": [
     {
       "zone_id": "Z01",
-      "aisle_y_values_m": [
-        -0.29,
-        0.61,
-        1.51,
-        2.41,
-        3.31
+      "side": "left",
+      "microzone_ids": [
+        "M01",
+        "M02",
+        "M03",
+        "M04",
+        "M05"
       ],
-      "y_min_m": -0.29,
-      "y_max_m": 3.31,
-      "allocation_workload": 0.0
+      "support_labels": [
+        "LC-08",
+        "LC-09",
+        "LC-10",
+        "LC-11",
+        "LC-12"
+      ],
+      "aisle_y_values_m": [
+        16.0274,
+        19.0754,
+        21.3614,
+        23.647399999999998,
+        25.9334
+      ],
+      "y_min_m": 16.0274,
+      "y_max_m": 25.9334,
+      "allocation_workload": 822.0
     },
     {
       "zone_id": "Z02",
-      "aisle_y_values_m": [
-        4.21,
-        5.11,
-        6.31,
-        7.51
+      "side": "left",
+      "microzone_ids": [
+        "M06",
+        "M07",
+        "M08",
+        "M09",
+        "M10"
       ],
-      "y_min_m": 4.21,
-      "y_max_m": 7.51,
-      "allocation_workload": 120.0
+      "support_labels": [
+        "LC-13",
+        "LC-14",
+        "LC-15",
+        "LC-16",
+        "LC-17"
+      ],
+      "aisle_y_values_m": [
+        28.2194,
+        30.505399999999998,
+        32.791399999999996,
+        35.0774,
+        37.3634
+      ],
+      "y_min_m": 28.2194,
+      "y_max_m": 37.3634,
+      "allocation_workload": 417.0
     },
     {
       "zone_id": "Z03",
-      "aisle_y_values_m": [
-        8.41,
-        9.31,
-        10.21,
-        11.11
+      "side": "right",
+      "microzone_ids": [
+        "M11",
+        "M12",
+        "M13",
+        "M14",
+        "M15"
       ],
-      "y_min_m": 8.41,
-      "y_max_m": 11.11,
-      "allocation_workload": 1578.0
+      "support_labels": [
+        "RC-08",
+        "RC-09",
+        "RC-10",
+        "RC-11",
+        "RC-12"
+      ],
+      "aisle_y_values_m": [
+        16.0274,
+        19.0754,
+        21.3614,
+        23.647399999999998,
+        25.9334
+      ],
+      "y_min_m": 16.0274,
+      "y_max_m": 25.9334,
+      "allocation_workload": 254.0
     },
     {
       "zone_id": "Z04",
-      "aisle_y_values_m": [
-        12.01,
-        12.91,
-        13.81,
-        14.71
+      "side": "right",
+      "microzone_ids": [
+        "M16",
+        "M17",
+        "M18",
+        "M19",
+        "M20"
       ],
-      "y_min_m": 12.01,
-      "y_max_m": 14.71,
-      "allocation_workload": 298.0
+      "support_labels": [
+        "RC-13",
+        "RC-14",
+        "RC-15",
+        "RC-16",
+        "RC-17"
+      ],
+      "aisle_y_values_m": [
+        28.2194,
+        30.505399999999998,
+        32.791399999999996,
+        35.0774,
+        37.3634
+      ],
+      "y_min_m": 28.2194,
+      "y_max_m": 37.3634,
+      "allocation_workload": 503.0
     }
   ],
   "allocations": {
     "random": {
-      "Z01": 0,
-      "Z02": 3,
-      "Z03": 2,
-      "Z04": 3
+      "Z01": 3,
+      "Z02": 1,
+      "Z03": 3,
+      "Z04": 1
     },
     "equal": {
-      "Z01": 0,
-      "Z02": 3,
-      "Z03": 3,
+      "Z01": 2,
+      "Z02": 2,
+      "Z03": 2,
       "Z04": 2
     },
     "volume_proportional": {
-      "Z01": 0,
-      "Z02": 1,
-      "Z03": 6,
-      "Z04": 1
+      "Z01": 3,
+      "Z02": 2,
+      "Z03": 1,
+      "Z04": 2
     }
   },
   "baseline": {
@@ -107,8 +178,9 @@
     "description": "Picking_Wave.csv의 원본 operator 배정을 그대로 유지한 Phase 2 방식의 observed baseline"
   },
   "definitions": {
-    "zone_partition": "Phase 1 graph의 horizontal support-point aisle y 좌표를 정렬한 뒤 zone 수만큼 연속적이고 가능한 균등한 aisle 개수로 분할한다.",
-    "list_zone_assignment": "각 fully-valid picking list를 분할하지 않고, pick task 수가 가장 많은 physical aisle zone에 귀속한다. 동률이면 pick units, 이후 zone 순서로 결정한다.",
+    "zone_partition": "수요 측정 공간은 CC 중심선을 기준으로 LC-08~LC-17, RC-08~RC-17의 20개 micro-zone으로 고정한다. 인력 배치는 Z01=LC08~12, Z02=LC13~17, Z03=RC08~12, Z04=RC13~17의 4개 macro-zone에서 수행한다.",
+    "microzone_mapping": "각 storage location은 CC-08 x좌표를 기준으로 left/right를 결정하고, 해당 side의 08~17 active cross-aisle anchor 중 원래 storage y좌표와 가장 가까운 micro-zone에 귀속한다. Navigation graph의 실제 route projection과는 별도다.",
+    "list_zone_assignment": "각 fully-valid picking list를 분할하지 않고, pick task 수가 가장 많은 workforce macro-zone에 귀속한다. 동률이면 pick units, 이후 zone 순서로 결정한다. 실제 worker는 기록된 pick sequence를 유지하며 필요하면 다른 macro-zone도 횡단한다.",
     "allocation_workload": "zone에 귀속된 전체 picking list workload. tasks 선택 시 list 내 pick task 수, units 선택 시 quantity units 합을 사용한다.",
     "active_zone": "allocation_workload가 0보다 큰 zone",
     "minimum_per_active_zone": "workload가 있는 zone만 대상으로 적용하는 최소 작업자 수. workload가 0인 zone에는 작업자를 강제로 두지 않는다.",
@@ -118,13 +190,67 @@
     "equal": "활성 zone에 작업자를 가능한 균등하게 배치",
     "volume_proportional": "활성 zone의 allocation workload 비중에 비례하여 작업자 배치",
     "demand_worker_l1_gap": "0.5 * sum(|worker_share - workload_share|). 0이면 작업자 비중과 workload 비중이 동일하다.",
-    "worker_allocation_entropy_normalized": "zone별 작업자 수 분포의 normalized Shannon entropy. 전체 zone 수를 범주 수로 사용한다.",
+    "worker_allocation_entropy_normalized": "4개 workforce macro-zone별 작업자 수 분포의 normalized Shannon entropy.",
     "congestion_conflict": "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 양의 대기가 발생한 resource contention event",
     "congestion_delay_ratio": "congestion_wait_seconds / (movement_seconds + congestion_wait_seconds). Comparison 표에서는 Congestion(%)로 표시한다.",
     "mean_flow_time_seconds": "각 picking list의 release 시점부터 완료 시점까지 걸린 시간 finished_at_seconds - released_at_seconds의 평균",
     "makespan_seconds": "선택된 picking list 중 최초 release 시점부터 마지막 완료 시점까지의 전체 처리 시간"
   },
-  "phase_boundary": "Phase 3는 observed baseline과 random/equal/volume_proportional 비교까지만 수행한다. entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다.",
+  "phase_boundary": "Phase 3는 observed baseline과 random/equal/volume_proportional 비교까지만 수행한다. entropy_based allocation은 Phase 4에서 20 micro-zone 내부 집중도를 추가 반영한다.",
+  "microzone_demand": {
+    "task_entropy_normalized": 0.8862673283675069,
+    "unit_entropy_normalized": 0.8862673283675069,
+    "macro_profiles": [
+      {
+        "zone_id": "Z01",
+        "microzone_workloads": [
+          70.0,
+          61.0,
+          148.0,
+          165.0,
+          240.0
+        ],
+        "microzone_entropy_normalized": 0.9261374012751566,
+        "microzone_concentration": 0.07386259872484335
+      },
+      {
+        "zone_id": "Z02",
+        "microzone_workloads": [
+          122.0,
+          136.0,
+          108.0,
+          42.0,
+          1.0
+        ],
+        "microzone_entropy_normalized": 0.8245153630100773,
+        "microzone_concentration": 0.17548463698992267
+      },
+      {
+        "zone_id": "Z03",
+        "microzone_workloads": [
+          45.0,
+          111.0,
+          129.0,
+          39.0,
+          32.0
+        ],
+        "microzone_entropy_normalized": 0.9018422151509149,
+        "microzone_concentration": 0.0981577848490851
+      },
+      {
+        "zone_id": "Z04",
+        "microzone_workloads": [
+          387.0,
+          71.0,
+          45.0,
+          39.0,
+          5.0
+        ],
+        "microzone_entropy_normalized": 0.5881065348010168,
+        "microzone_concentration": 0.4118934651989832
+      }
+    ]
+  },
   "demand_entropy": {
     "warehouse_pick_nodes": 466,
     "demand_nodes_used": 242,

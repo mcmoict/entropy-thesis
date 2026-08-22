@@ -55,9 +55,9 @@ pip install networkx
 
 ## 중요한 모델링 가정
 
-1. CAD 좌표값은 기본적으로 cm로 보고 0.01을 곱해 m로 변환한다.
+1. CAD 좌표값은 inch로 해석하고 0.0254를 곱해 m로 변환한다. (15 raw units = 15 inch = 0.381 m 물리치수와 일치)
 2. `z=1~4`는 랙 레벨이며 작업자 평면 보행거리에는 직접 사용하지 않는다.
-3. 각 Storage Location은 가장 가까운 Support Point의 y 좌표에 있는 피킹 통로로 투영한다.
+3. Navigation graph에서는 각 Storage Location을 가장 가까운 Support Point의 y 좌표에 있는 피킹 통로로 투영한다. 수요 micro-zone 분할은 Phase 3부터 별도의 논리적 공간구획을 사용한다.
 4. `Picking_Wave.csv`의 행 순서를 실제 피킹 순서로 보존한다.
 5. 같은 wave에 여러 operator가 실제로 존재하므로 `(waveNumber, operator)` 단위로 PickingList를 만든다.
 6. Storage_Location.csv에 좌표가 없는 `RC-01` 등의 위치는 좌표를 임의 생성하지 않는다. audit에서 unresolved로 기록한다.

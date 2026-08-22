@@ -3,25 +3,22 @@
 Shannon entropy로 물류센터 피킹 작업자의 공간적 집중과 혼잡을 측정하고,
 네 가지 작업자 배치 방식을 이산 사건 시뮬레이션으로 비교하는 석사 논문 연구 프로젝트입니다.
 
-## 비교 방법
+## 실제 데이터 연구 모델 (Phase 1~5)
 
-- **Random Allocation**: seed가 고정된 균등 무작위 배치
-- **Equal Allocation**: 구역별 균등 배치
-- **Volume Proportional Allocation**: 구역별 물동량 비중에 따른 배치
-- **Entropy-based Allocation**: 수요 적합도와 작업자 분포 엔트로피를 함께 고려한 배치
-
-엔트로피 기반 방법은 연속 작업자 비율 `p`와 정규화된 수요 `d`에 대해 다음 목적을
-최소화합니다.
+- 원본 CAD 좌표 단위: **inch**, `1 inch = 0.0254 m`
+- 모든 picker의 단일 출발/종료 depot: **CC-08**
+- 수요 공간: **20 micro-zones** = LC-08~17 + RC-08~17
+- 인력 배치 공간: **4 macro-zones** = Left/Right × Near/Far
+- Phase 3 비교: Observed Baseline / Random / Equal / Volume Proportional
+- Phase 4 제안법: macro workload에 micro-zone 수요 집중도 `C_z = 1 - H_z`를 반영
 
 ```text
-KL(p || d) - lambda * H(p)
-p_i ∝ d_i ** (1 / (1 + lambda))
+A_z(lambda) = V_z * (1 + lambda * C_z)
 ```
 
-`entropy_weight`가 `0`이면 물동량 비례 방식과 같고, 값이 커질수록 양의 수요가 있는
-구역 사이에서 균등한 분포에 가까워집니다. `minimum_per_zone`은 실제 하한으로 적용한
-뒤 water-filling과 largest-remainder 방식으로 정수화합니다. 소수부 동률은 설정의 구역
-순서로 결정되므로 결과가 재현 가능합니다.
+`lambda=0`이면 Volume Proportional과 동일하고, λ가 증가하면 내부 수요가 더 집중된 macro-zone의 배치 가중치가 커진다. 최적 λ*는 Calibration 날짜에서 선택하고 Phase 5의 Frozen Holdout에서는 재보정하지 않는다.
+
+> `entropy_thesis.allocation.entropy_based_allocation`에는 초기 합성실험용 entropy-regularization 함수가 남아 있지만, **실제 데이터 Phase 4/5의 제안 방법은 위 micro-zone concentration 공식**을 사용한다.
 
 ## 환경 구성
 

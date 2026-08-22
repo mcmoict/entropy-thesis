@@ -19,11 +19,13 @@ from .phase2 import DemandEntropyMetrics, calculate_demand_entropy
 from .phase3 import (
     PHASE3_METHODS,
     AisleZone,
+    THESIS_MODEL_REVISION,
     Phase3MethodResult,
     PickingListZoneAssignment,
     allocate_phase3_workers,
     build_aisle_zones,
     classify_picking_lists_by_zone,
+    macro_zone_demand_profiles,
     run_phase3_method,
     run_phase3_observed_baseline,
     zone_workload,
@@ -116,6 +118,7 @@ class Phase5DateResult:
     picking_lists: tuple[PickingList, ...]
     assignments: tuple[PickingListZoneAssignment, ...]
     workloads: tuple[float, ...]
+    microzone_concentrations: tuple[float, ...]
     demand_entropy: DemandEntropyMetrics
     observed_workers: int
     effective_workers: int
@@ -256,6 +259,14 @@ def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
             f"(phase={payload.get('phase')!r})."
         )
 
+    model_revision = str(payload.get("model_revision", ""))
+    if model_revision != THESIS_MODEL_REVISION:
+        raise ValueError(
+            "Phase 4 recommendation이 현재 물리/Zone 모델과 호환되지 않습니다. "
+            f"expected={THESIS_MODEL_REVISION!r}, found={model_revision or '<missing>'!r}. "
+            "CC-08/inch/20-micro/4-macro 수정 후 Phase 4를 다시 실행하세요."
+        )
+
     entropy_weight = float(payload["entropy_weight"])
     if not math.isfinite(entropy_weight) or entropy_weight < 0:
         raise ValueError(f"잘못된 Phase 4 entropy_weight입니다: {entropy_weight}")
@@ -305,6 +316,12 @@ def _run_one_date(
 ) -> Phase5DateResult:
     assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
     workloads = zone_workload(zones, assignments, basis=volume_basis)
+    macro_profiles = macro_zone_demand_profiles(
+        warehouse, selected_lists, zones, basis=volume_basis
+    )
+    microzone_concentrations = tuple(
+        profile.microzone_concentration for profile in macro_profiles
+    )
     demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
     observed_workers = len({item.operator for item in selected_lists})
     effective_workers = observed_workers if total_workers is None else total_workers
@@ -387,6 +404,7 @@ def _run_one_date(
         total_workers=effective_workers,
         workloads=workloads,
         entropy_weight=entropy_weight,
+        microzone_concentrations=microzone_concentrations,
         minimum_per_active_zone=minimum_per_active_zone,
     )
     reused = result_by_counts.get(entropy_counts)
@@ -428,6 +446,7 @@ def _run_one_date(
         picking_lists=tuple(selected_lists),
         assignments=assignments,
         workloads=workloads,
+        microzone_concentrations=microzone_concentrations,
         demand_entropy=demand_entropy,
         observed_workers=observed_workers,
         effective_workers=effective_workers,
@@ -489,7 +508,7 @@ def build_and_run_phase5(
     )
     audit = audit_picking_locations(warehouse, dataset.picking_lists)
     if progress is not None:
-        progress.report(0.08, "Building physical aisle zones")
+        progress.report(0.08, "Building 20 demand micro-zones / 4 workforce macro-zones")
     zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
     grouped = _date_map(warehouse, dataset.picking_lists)
     available = set(grouped)
@@ -654,17 +673,31 @@ def phase5_allocation_records(run: Phase5Run) -> list[dict[str, object]]:
         method_counts.append(("entropy_based", result.entropy_worker_counts))
         for method, worker_counts in method_counts:
             total_workers = sum(worker_counts)
-            for zone, workload, workers in zip(
-                run.zones, result.workloads, worker_counts, strict=True
+            for zone, workload, concentration, workers in zip(
+                run.zones,
+                result.workloads,
+                result.microzone_concentrations,
+                worker_counts,
+                strict=True,
             ):
+                adjusted_workload = (
+                    workload * (1.0 + run.entropy_weight * concentration)
+                    if method == "entropy_based"
+                    else workload
+                )
                 records.append(
                     {
                         "selected_date": result.selected_date.isoformat(),
                         "method": method,
                         "entropy_weight": run.entropy_weight if method == "entropy_based" else None,
                         "zone_id": zone.zone_id,
+                        "side": zone.side,
+                        "support_labels": "|".join(zone.support_labels),
                         "workload": workload,
                         "workload_share": 0.0 if total_workload == 0 else workload / total_workload,
+                        "microzone_concentration": concentration,
+                        "microzone_entropy_normalized": 1.0 - concentration,
+                        "allocation_weight": adjusted_workload,
                         "workers": workers,
                         "worker_share": 0.0 if total_workers == 0 else workers / total_workers,
                     }
@@ -984,6 +1017,7 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
 
     metadata = {
         "phase": 5,
+        "model_revision": THESIS_MODEL_REVISION,
         "purpose": "out-of-sample holdout validation of Baseline/Random/Equal/Volume/Entropy(lambda*)",
         "calibration_dates": [value.isoformat() for value in run.calibration_dates],
         "holdout_dates_frozen": [value.isoformat() for value in run.holdout_dates],
@@ -998,7 +1032,8 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
             "interpretation": (
                 "lambda is selected only from Phase 4 calibration dates and held fixed across "
                 "the untouched Phase 4 holdout dates; zone worker counts are recalculated from "
-                "each holdout date's workload distribution"
+                "each holdout date's macro workload and within-macro micro-zone concentration "
+                "using A_z = V_z * (1 + lambda * C_z)"
             ),
         },
         "input": {
@@ -1187,7 +1222,7 @@ def main() -> None:
     print("equal               : workers distributed as evenly as possible across active zones")
     print("volume_proportional : workers allocated in proportion to each date's zone workload")
     print(
-        f"entropy_based       : entropy-regularized workload allocation with fixed lambda={run.entropy_weight:g}"
+        f"entropy_based       : workload × (1 + lambda × micro-zone concentration), fixed lambda={run.entropy_weight:g}"
     )
     print()
     print(f"=== Worker Allocation | Holdout Mean by Zone ({len(run.results):,} dates) ===")

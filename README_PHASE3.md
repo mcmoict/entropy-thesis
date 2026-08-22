@@ -24,22 +24,32 @@ Phase 3에서 가장 중요한 원칙은 **피킹 리스트 자체를 바꾸지 
 
 ## Zone 정의
 
-창고 zone을 Location 이름의 `A`, `B`, `C` 같은 prefix로 만들지 않는다. 해당 prefix는 물리 좌표와 완전히 일치하는 독립 작업구역이라고 보기 어렵기 때문이다.
+Phase 3부터 공간 해상도를 **20개 demand micro-zone + 4개 workforce macro-zone**으로 분리한다. Navigation graph는 전체 창고 구조를 그대로 유지하며, Zone은 작업량 측정과 인력배치에만 사용한다.
 
-Phase 1에서 storage location은 가장 가까운 horizontal support-point aisle의 `y` 좌표로 투영되어 있다. 따라서 Phase 3에서는 이 실제 graph 구조를 사용한다.
+### 20개 Demand Micro-zone
 
-기본값 `--zones 4`에서는 전체 horizontal aisle y 좌표를 정렬한 뒤, 연속된 aisle 개수가 가능한 균등하도록 4개 zone으로 나눈다.
-
-현재 데이터의 horizontal aisle이 17개이므로 기본 zone은 다음과 같이 5/4/4/4 aisle 수준으로 구성된다.
+중앙 `CC` line을 기준으로 좌우를 분리하고, 실제 Picking_Wave가 사용하는 상부 active picking area를 다음과 같이 고정한다.
 
 ```text
-Z01 : 앞쪽 5개 aisle
-Z02 : 다음 4개 aisle
-Z03 : 다음 4개 aisle
-Z04 : 마지막 4개 aisle
+Left : LC-08 ~ LC-17 = 10 micro-zones (M01~M10)
+Right: RC-08 ~ RC-17 = 10 micro-zones (M11~M20)
+총 20개
 ```
 
-이 zone 경계는 선택 날짜의 수요를 보고 동적으로 만들지 않는다. 따라서 날짜별 실험에서도 동일한 물리적 공간 구획을 유지할 수 있다.
+각 storage location은 `CC-08`의 x좌표를 기준으로 left/right를 결정한 뒤, 해당 side의 08~17 anchor 중 **원래 storage y좌표와 가장 가까운 micro-zone**에 귀속한다. 이 논리적 demand mapping은 Navigation graph의 실제 route projection과 별개이므로 H-row의 소수 위치가 graph상 CC/LC-07에 가까워도 demand category는 첫 active cell(08)에 포함될 수 있다.
+
+### 4개 Workforce Macro-zone
+
+작업자는 기본 8명 수준이므로 20개 cell 각각에 전담 작업자를 두지 않는다. 20개 micro-zone을 다음 4개 인력배치 영역으로 묶는다.
+
+```text
+Z01 = LC-08 ~ LC-12   (Left / Near)
+Z02 = LC-13 ~ LC-17   (Left / Far)
+Z03 = RC-08 ~ RC-12   (Right / Near)
+Z04 = RC-13 ~ RC-17   (Right / Far)
+```
+
+`--zones`는 현재 논문 모델에서 4로 고정된다. Zone 경계는 날짜별 수요를 보고 바꾸지 않으며 모든 Calibration/Holdout 날짜에서 동일하게 유지한다.
 
 ## Picking list의 zone 귀속
 
@@ -162,7 +172,7 @@ python -m entropy_thesis.simulation.phase3 --data-dir data/raw --date 2023-01-05
 ## 주요 옵션
 
 ```text
---zones 4                       물리적 aisle zone 수
+--zones 4                       workforce macro-zone 수 (현재 4로 고정; demand micro-zone은 20개)
 --workers N                     전체 작업자 수; 생략 시 실제 operator 수
 --volume-basis tasks|units      Volume Proportional의 물동량 기준
 --minimum-per-active-zone 1     workload가 있는 zone의 최소 작업자 수
@@ -181,6 +191,7 @@ python -m entropy_thesis.simulation.phase3 --data-dir data/raw --date 2023-01-05
 ```text
 phase3_summary.csv
 phase3_zones.csv
+phase3_microzones.csv
 phase3_workers.csv
 phase3_lists.csv
 phase3_congestion.csv
@@ -226,7 +237,8 @@ phase3_metadata.json
 - original operator
 - assigned zone
 - list task / unit 수
-- list가 실제로 걸친 physical zone 수
+- list가 실제로 걸친 physical macro-zone 수
+- list가 실제로 걸친 physical micro-zone 수
 - dominant zone task / unit 수
 
 이 파일로 zone 귀속 규칙을 사후 감사할 수 있다.
@@ -293,7 +305,7 @@ H_W = - Σ p_i log2(p_i)
 - `0`: workload 비중과 worker 비중이 완전히 동일
 - 값이 커질수록 수요와 작업자 배치 비중의 불일치가 큼
 
-Volume Proportional 방법이 이 값을 낮추는 방향이고, Phase 4의 Entropy-based 방법은 이 수요 적합성과 분산도를 동시에 고려하게 된다.
+Volume Proportional 방법은 macro-zone 총 workload만 사용한다. Phase 4의 Entropy-based 방법은 각 macro-zone 내부 5개 micro-zone의 Shannon entropy로 계산한 공간 집중도까지 추가 반영한다.
 
 ## Phase 3에서 하지 않는 것
 

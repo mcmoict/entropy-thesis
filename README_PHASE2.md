@@ -1,5 +1,7 @@
 # Phase 2 - 실제 데이터 기반 이동거리 · 혼잡 · 공간 엔트로피
 
+> **2026-08-22 물리모델 정정:** 원본 CAD 좌표는 inch로 해석하며 `1 inch = 0.0254 m`로 변환한다. 기본 I/O는 `CC-08`로 고정하며, CC-08이 없으면 다른 지점으로 fallback하지 않고 오류를 발생시킨다.
+
 Phase 1에서 구축한 실제 창고 graph와 Picking_Wave 피킹 순서를 그대로 사용하여 다음 다섯 가지를 계산한다.
 
 1. **이동거리 (Travel Distance)**
@@ -52,7 +54,7 @@ python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
 --output-dir results/phase2 결과 저장 위치
 ```
 
-기본 모델은 한 picking list가 끝나면 작업자가 `CC-01` 기반 기본 I/O 지점으로 복귀한 뒤 다음 list를 처리한다.
+기본 모델은 모든 picker가 데이터셋 레이아웃의 단일 I/O인 `CC-08`에서 시작하고, 한 picking list가 끝날 때마다 `CC-08`로 복귀한 뒤 다음 list를 처리한다.
 
 ## Phase 1 데이터 처리 원칙 유지
 

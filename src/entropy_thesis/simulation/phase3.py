@@ -45,12 +45,43 @@ PHASE3_METHODS: tuple[Phase3Method, ...] = (
 )
 
 
+ACTIVE_PICKING_CORRIDOR_START = 8
+ACTIVE_PICKING_CORRIDOR_END = 17
+DEFAULT_MACRO_ZONES = 4
+THESIS_MODEL_REVISION = "2026-08-22-cc08-inch-micro20-macro4"
+
+
+@dataclass(frozen=True)
+class MicroZone:
+    """Logical demand cell: one LC/RC side at one active cross-aisle level."""
+
+    microzone_id: str
+    support_label: str
+    side: Literal["left", "right"]
+    corridor: Literal["LC", "RC"]
+    corridor_index: int
+    y_anchor_m: float
+
+
 @dataclass(frozen=True)
 class AisleZone:
+    """Worker-allocation macro zone composed of five demand micro-zones."""
+
     zone_id: str
+    side: Literal["left", "right"]
+    microzone_ids: tuple[str, ...]
+    support_labels: tuple[str, ...]
     aisle_y_values: tuple[float, ...]
     y_min_m: float
     y_max_m: float
+
+
+@dataclass(frozen=True)
+class MacroZoneDemandProfile:
+    zone_id: str
+    microzone_workloads: tuple[float, ...]
+    microzone_entropy_normalized: float
+    microzone_concentration: float
 
 
 @dataclass(frozen=True)
@@ -62,6 +93,7 @@ class PickingListZoneAssignment:
     pick_tasks: int
     pick_units: float
     physical_zone_count: int
+    physical_microzone_count: int
     dominant_zone_tasks: int
     dominant_zone_units: float
 
@@ -155,49 +187,85 @@ def _execution_time_metrics(
     return mean(flow_times), makespan_seconds
 
 
+def build_micro_zones(warehouse: WarehouseGraph) -> tuple[MicroZone, ...]:
+    """Build the fixed 20 active demand cells LC/RC-08..17.
+
+    These cells are *logical demand regions*, not additional navigation nodes.
+    Storage routing continues to use the original warehouse graph.  For demand
+    segmentation, each pick is assigned left/right of the CC line and to the
+    nearest active cross-aisle anchor (08..17).  This intentionally maps the
+    small H-row pocket below CC-08 into the first active micro-zone rather than
+    creating an unused LC/RC-07 demand category.
+    """
+
+    microzones: list[MicroZone] = []
+    sequence = 1
+    for corridor, side in (("LC", "left"), ("RC", "right")):
+        for index in range(ACTIVE_PICKING_CORRIDOR_START, ACTIVE_PICKING_CORRIDOR_END + 1):
+            label = f"{corridor}-{index:02d}"
+            node_id = warehouse.support_nodes.get(label)
+            if node_id is None:
+                raise ValueError(
+                    f"20개 active micro-zone을 구성하려면 support point {label}이 필요합니다."
+                )
+            y_m = float(warehouse.graph.nodes[node_id]["y_m"])
+            microzones.append(
+                MicroZone(
+                    microzone_id=f"M{sequence:02d}",
+                    support_label=label,
+                    side=side,
+                    corridor=corridor,
+                    corridor_index=index,
+                    y_anchor_m=y_m,
+                )
+            )
+            sequence += 1
+    return tuple(microzones)
+
+
 def build_aisle_zones(
     warehouse: WarehouseGraph,
     *,
-    number_of_zones: int = 4,
+    number_of_zones: int = DEFAULT_MACRO_ZONES,
 ) -> tuple[AisleZone, ...]:
-    """Partition horizontal picking aisles into contiguous balanced zones.
+    """Build four fixed workforce macro-zones from the 20 demand micro-zones.
 
-    Phase 1 projects every storage location onto a support-point y coordinate.
-    Phase 3 therefore partitions the sorted unique support y coordinates, not
-    arbitrary storage prefixes.  With 17 horizontal aisles and four zones the
-    groups contain 5/4/4/4 aisle levels.
+    Z01 = LC-08..12 (left / near depot)
+    Z02 = LC-13..17 (left / far)
+    Z03 = RC-08..12 (right / near depot)
+    Z04 = RC-13..17 (right / far)
+
+    Demand is measured at the finer 20-cell resolution, while eight workers are
+    allocated across four macro-zones.  Keeping these two spatial scales
+    separate avoids the impossible requirement of one worker per 20 cells.
     """
 
     if isinstance(number_of_zones, bool) or not isinstance(number_of_zones, int):
         raise TypeError("number_of_zones는 정수여야 합니다.")
-    if number_of_zones <= 0:
-        raise ValueError("number_of_zones는 1 이상이어야 합니다.")
-
-    aisle_y = sorted(
-        {
-            round(float(attrs["y_m"]), 9)
-            for _, attrs in warehouse.graph.nodes(data=True)
-            if attrs.get("kind") == "support"
-        }
-    )
-    if not aisle_y:
-        raise ValueError("warehouse graph에 support aisle y 좌표가 없습니다.")
-    if number_of_zones > len(aisle_y):
+    if number_of_zones != DEFAULT_MACRO_ZONES:
         raise ValueError(
-            "number_of_zones는 horizontal aisle 수보다 클 수 없습니다. "
-            f"zones={number_of_zones}, aisles={len(aisle_y)}"
+            "현재 논문 모델은 20 micro-zones를 4개 workforce macro-zones로 고정합니다. "
+            f"--zones={DEFAULT_MACRO_ZONES}를 사용하세요."
         )
 
-    quotient, remainder = divmod(len(aisle_y), number_of_zones)
+    microzones = build_micro_zones(warehouse)
+    by_label = {micro.support_label: micro for micro in microzones}
+    definitions = (
+        ("Z01", "left", tuple(f"LC-{i:02d}" for i in range(8, 13))),
+        ("Z02", "left", tuple(f"LC-{i:02d}" for i in range(13, 18))),
+        ("Z03", "right", tuple(f"RC-{i:02d}" for i in range(8, 13))),
+        ("Z04", "right", tuple(f"RC-{i:02d}" for i in range(13, 18))),
+    )
     zones: list[AisleZone] = []
-    start = 0
-    for index in range(number_of_zones):
-        size = quotient + (1 if index < remainder else 0)
-        values = tuple(aisle_y[start : start + size])
-        start += size
+    for zone_id, side, labels in definitions:
+        members = tuple(by_label[label] for label in labels)
+        values = tuple(member.y_anchor_m for member in members)
         zones.append(
             AisleZone(
-                zone_id=f"Z{index + 1:02d}",
+                zone_id=zone_id,
+                side=side,
+                microzone_ids=tuple(member.microzone_id for member in members),
+                support_labels=labels,
                 aisle_y_values=values,
                 y_min_m=min(values),
                 y_max_m=max(values),
@@ -206,13 +274,55 @@ def build_aisle_zones(
     return tuple(zones)
 
 
-def _aisle_zone_lookup(zones: Iterable[AisleZone]) -> dict[float, str]:
-    lookup: dict[float, str] = {}
+def _cc_x_m(warehouse: WarehouseGraph) -> float:
+    node_id = warehouse.support_nodes.get("CC-08")
+    if node_id is None:
+        raise ValueError("micro-zone 좌우 구분을 위해 CC-08 support point가 필요합니다.")
+    return float(warehouse.graph.nodes[node_id]["x_m"])
+
+
+def microzone_for_location(
+    warehouse: WarehouseGraph,
+    microzones: Iterable[MicroZone],
+    location_id: str,
+) -> str:
+    """Map a storage location to one of the 20 logical demand micro-zones."""
+
+    try:
+        location = warehouse.storage_by_id[str(location_id).strip()]
+    except KeyError as exc:
+        raise KeyError(f"알 수 없는 Storage Location: {location_id}") from exc
+
+    cc_x = _cc_x_m(warehouse)
+    if location.x_m < cc_x:
+        side = "left"
+    elif location.x_m > cc_x:
+        side = "right"
+    else:
+        raise ValueError(
+            f"location={location_id}가 CC 중심선(x={cc_x}) 위에 있어 LC/RC micro-zone을 결정할 수 없습니다."
+        )
+
+    candidates = [micro for micro in microzones if micro.side == side]
+    if not candidates:
+        raise ValueError(f"{side} micro-zone이 없습니다.")
+    selected = min(
+        candidates,
+        key=lambda micro: (
+            abs(location.y_m - micro.y_anchor_m),
+            micro.corridor_index,
+        ),
+    )
+    return selected.microzone_id
+
+
+def _micro_to_macro_lookup(zones: Iterable[AisleZone]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
     for zone in zones:
-        for y in zone.aisle_y_values:
-            if y in lookup:
-                raise ValueError(f"aisle y={y}가 둘 이상의 zone에 포함됩니다.")
-            lookup[y] = zone.zone_id
+        for microzone_id in zone.microzone_ids:
+            if microzone_id in lookup:
+                raise ValueError(f"micro-zone {microzone_id}가 둘 이상의 macro-zone에 포함됩니다.")
+            lookup[microzone_id] = zone.zone_id
     return lookup
 
 
@@ -221,14 +331,14 @@ def zone_for_location(
     zones: Iterable[AisleZone],
     location_id: str,
 ) -> str:
-    node_id = warehouse.node_for_location(location_id)
-    y_value = round(float(warehouse.graph.nodes[node_id]["y_m"]), 9)
-    lookup = _aisle_zone_lookup(zones)
+    zone_tuple = tuple(zones)
+    microzone_id = microzone_for_location(warehouse, build_micro_zones(warehouse), location_id)
+    lookup = _micro_to_macro_lookup(zone_tuple)
     try:
-        return lookup[y_value]
+        return lookup[microzone_id]
     except KeyError as exc:
         raise KeyError(
-            f"location={location_id}의 aisle y={y_value}를 Phase 3 zone에 매핑할 수 없습니다."
+            f"location={location_id}의 micro-zone={microzone_id}를 workforce macro-zone에 매핑할 수 없습니다."
         ) from exc
 
 
@@ -237,33 +347,35 @@ def classify_picking_lists_by_zone(
     picking_lists: Iterable[PickingList],
     zones: Iterable[AisleZone],
 ) -> tuple[PickingListZoneAssignment, ...]:
-    """Assign each intact picking list to its dominant physical aisle zone.
+    """Assign each intact picking list to its dominant workforce macro-zone.
 
-    The original list is *not split*.  The zone containing the largest number
-    of pick tasks is selected.  Ties are resolved by picked units and then by
-    the configured zone order.  Keeping the list intact preserves the Phase 2
-    route, task order and return-to-I/O semantics so allocation policy remains
-    the principal experimental change.
+    Physical demand is first resolved at the 20-micro-zone scale.  The list is
+    never split: the macro-zone containing the most pick tasks owns the whole
+    list for dispatch. Ties use picked units and then configured macro-zone
+    order. The worker still follows the original recorded pick sequence and may
+    cross macro-zone boundaries while executing the list.
     """
 
     zone_tuple = tuple(zones)
     if not zone_tuple:
         raise ValueError("zones가 비어 있습니다.")
     zone_order = {zone.zone_id: index for index, zone in enumerate(zone_tuple)}
-    lookup = _aisle_zone_lookup(zone_tuple)
+    microzones = build_micro_zones(warehouse)
+    macro_lookup = _micro_to_macro_lookup(zone_tuple)
 
     assignments: list[PickingListZoneAssignment] = []
     for list_index, picking_list in enumerate(picking_lists):
         task_counts: Counter[str] = Counter()
         unit_counts: defaultdict[str, float] = defaultdict(float)
+        physical_microzones: set[str] = set()
         for task in picking_list.picks:
-            node_id = warehouse.node_for_location(task.location_id)
-            y_value = round(float(warehouse.graph.nodes[node_id]["y_m"]), 9)
+            microzone_id = microzone_for_location(warehouse, microzones, task.location_id)
+            physical_microzones.add(microzone_id)
             try:
-                zone_id = lookup[y_value]
+                zone_id = macro_lookup[microzone_id]
             except KeyError as exc:
                 raise KeyError(
-                    f"location={task.location_id}의 aisle y={y_value}를 zone에 매핑할 수 없습니다."
+                    f"location={task.location_id}의 micro-zone={microzone_id}를 macro-zone에 매핑할 수 없습니다."
                 ) from exc
             task_counts[zone_id] += 1
             unit_counts[zone_id] += float(task.quantity_units)
@@ -291,12 +403,64 @@ def classify_picking_lists_by_zone(
                 pick_tasks=len(picking_list.picks),
                 pick_units=sum(float(task.quantity_units) for task in picking_list.picks),
                 physical_zone_count=len(task_counts),
+                physical_microzone_count=len(physical_microzones),
                 dominant_zone_tasks=task_counts[dominant_zone],
                 dominant_zone_units=unit_counts[dominant_zone],
             )
         )
     return tuple(assignments)
 
+
+def microzone_workload(
+    warehouse: WarehouseGraph,
+    picking_lists: Iterable[PickingList],
+    *,
+    basis: Literal["tasks", "units"] = "tasks",
+) -> tuple[float, ...]:
+    if basis not in {"tasks", "units"}:
+        raise ValueError("basis는 'tasks' 또는 'units'여야 합니다.")
+    microzones = build_micro_zones(warehouse)
+    index_by_id = {micro.microzone_id: index for index, micro in enumerate(microzones)}
+    values = [0.0] * len(microzones)
+    for picking_list in picking_lists:
+        for task in picking_list.picks:
+            microzone_id = microzone_for_location(warehouse, microzones, task.location_id)
+            values[index_by_id[microzone_id]] += (
+                1.0 if basis == "tasks" else float(task.quantity_units)
+            )
+    return tuple(values)
+
+
+def macro_zone_demand_profiles(
+    warehouse: WarehouseGraph,
+    picking_lists: Iterable[PickingList],
+    zones: Iterable[AisleZone],
+    *,
+    basis: Literal["tasks", "units"] = "tasks",
+) -> tuple[MacroZoneDemandProfile, ...]:
+    """Return within-macro micro-zone entropy and concentration (1-H)."""
+
+    zone_tuple = tuple(zones)
+    microzones = build_micro_zones(warehouse)
+    micro_values = microzone_workload(warehouse, picking_lists, basis=basis)
+    value_by_id = {
+        micro.microzone_id: value
+        for micro, value in zip(microzones, micro_values, strict=True)
+    }
+    profiles: list[MacroZoneDemandProfile] = []
+    for zone in zone_tuple:
+        values = tuple(value_by_id[micro_id] for micro_id in zone.microzone_ids)
+        entropy = normalized_shannon_entropy(values)
+        concentration = 0.0 if sum(values) <= 0.0 else 1.0 - entropy
+        profiles.append(
+            MacroZoneDemandProfile(
+                zone_id=zone.zone_id,
+                microzone_workloads=values,
+                microzone_entropy_normalized=entropy,
+                microzone_concentration=concentration,
+            )
+        )
+    return tuple(profiles)
 
 def zone_workload(
     zones: Iterable[AisleZone],
@@ -900,15 +1064,18 @@ def _zone_records(
 
     physical_tasks: defaultdict[str, int] = defaultdict(int)
     physical_units: defaultdict[str, float] = defaultdict(float)
-    lookup = _aisle_zone_lookup(zones)
     for picking_list in picking_lists:
         for task in picking_list.picks:
-            node_id = warehouse.node_for_location(task.location_id)
-            y_value = round(float(warehouse.graph.nodes[node_id]["y_m"]), 9)
-            zone_id = lookup[y_value]
+            zone_id = zone_for_location(warehouse, zones, task.location_id)
             physical_tasks[zone_id] += 1
             physical_units[zone_id] += float(task.quantity_units)
 
+    profiles = {
+        profile.zone_id: profile
+        for profile in macro_zone_demand_profiles(
+            warehouse, picking_lists, zones, basis=volume_basis
+        )
+    }
     workloads = zone_workload(zones, assignments, basis=volume_basis)
     total_workload = sum(workloads)
     records: list[dict[str, object]] = []
@@ -918,9 +1085,14 @@ def _zone_records(
                 {
                     "method": result.method,
                     "zone_id": zone.zone_id,
+                    "side": zone.side,
+                    "microzone_ids": "|".join(zone.microzone_ids),
+                    "support_labels": "|".join(zone.support_labels),
                     "aisle_count": len(zone.aisle_y_values),
                     "aisle_y_min_m": zone.y_min_m,
                     "aisle_y_max_m": zone.y_max_m,
+                    "microzone_entropy_normalized": profiles[zone.zone_id].microzone_entropy_normalized,
+                    "microzone_concentration": profiles[zone.zone_id].microzone_concentration,
                     "assigned_lists": assignment_lists.get(zone.zone_id, 0),
                     "assigned_list_tasks": assignment_tasks.get(zone.zone_id, 0),
                     "assigned_list_units": assignment_units.get(zone.zone_id, 0.0),
@@ -933,6 +1105,40 @@ def _zone_records(
                     "worker_share": workers / sum(result.worker_counts),
                 }
             )
+    return records
+
+
+def _microzone_records(
+    warehouse: WarehouseGraph,
+    picking_lists: list[PickingList],
+    zones: tuple[AisleZone, ...],
+) -> list[dict[str, object]]:
+    microzones = build_micro_zones(warehouse)
+    task_values = microzone_workload(warehouse, picking_lists, basis="tasks")
+    unit_values = microzone_workload(warehouse, picking_lists, basis="units")
+    macro_lookup = _micro_to_macro_lookup(zones)
+    total_tasks = sum(task_values)
+    total_units = sum(unit_values)
+    task_entropy = normalized_shannon_entropy(task_values)
+    unit_entropy = normalized_shannon_entropy(unit_values)
+    records: list[dict[str, object]] = []
+    for micro, tasks, units in zip(microzones, task_values, unit_values, strict=True):
+        records.append(
+            {
+                "microzone_id": micro.microzone_id,
+                "support_label": micro.support_label,
+                "macro_zone_id": macro_lookup[micro.microzone_id],
+                "side": micro.side,
+                "corridor_index": micro.corridor_index,
+                "y_anchor_m": micro.y_anchor_m,
+                "pick_tasks": tasks,
+                "task_share": 0.0 if total_tasks == 0 else tasks / total_tasks,
+                "pick_units": units,
+                "unit_share": 0.0 if total_units == 0 else units / total_units,
+                "overall_task_entropy_normalized": task_entropy,
+                "overall_unit_entropy_normalized": unit_entropy,
+            }
+        )
     return records
 
 
@@ -967,6 +1173,9 @@ def write_phase3_results(
             volume_basis=volume_basis,
         )
     ).to_csv(output_dir / "phase3_zones.csv", index=False)
+    pd.DataFrame(
+        _microzone_records(warehouse, picking_lists, zones)
+    ).to_csv(output_dir / "phase3_microzones.csv", index=False)
 
     worker_records = [
         record for result in comparison_results for record in _worker_records(result)
@@ -1060,7 +1269,7 @@ def build_and_run_phase3(
         max_lists=max_lists,
     )
     if progress is not None:
-        progress.report(0.20, "Building physical aisle zones")
+        progress.report(0.20, "Building 20 demand micro-zones / 4 workforce macro-zones")
     zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
     assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
     workloads = zone_workload(zones, assignments, basis=volume_basis)
@@ -1278,6 +1487,13 @@ def main() -> None:
     workloads = zone_workload(zones, assignments, basis=args.volume_basis)
     metadata = {
         "phase": 3,
+        "model_revision": THESIS_MODEL_REVISION,
+        "physical_model": {
+            "source_coordinate_unit": "inch",
+            "coordinate_scale_to_meter": 0.0254,
+            "default_io_node": warehouse.default_start_node(),
+            "default_io_label": "CC-08",
+        },
         "selected_date": selected_date.isoformat(),
         "origin_timestamp": origin.isoformat(),
         "input": {
@@ -1291,6 +1507,7 @@ def main() -> None:
         "parameters": {
             "methods": list(args.methods),
             "zones": args.zones,
+            "demand_microzones": 20,
             "workers": args.workers,
             "effective_workers": sum(results[0].worker_counts),
             "volume_basis": args.volume_basis,
@@ -1307,6 +1524,9 @@ def main() -> None:
         "zones": [
             {
                 "zone_id": zone.zone_id,
+                "side": zone.side,
+                "microzone_ids": list(zone.microzone_ids),
+                "support_labels": list(zone.support_labels),
                 "aisle_y_values_m": list(zone.aisle_y_values),
                 "y_min_m": zone.y_min_m,
                 "y_max_m": zone.y_max_m,
@@ -1333,12 +1553,19 @@ def main() -> None:
         },
         "definitions": {
             "zone_partition": (
-                "Phase 1 graph의 horizontal support-point aisle y 좌표를 정렬한 뒤 "
-                "zone 수만큼 연속적이고 가능한 균등한 aisle 개수로 분할한다."
+                "수요 측정 공간은 CC 중심선을 기준으로 LC-08~LC-17, RC-08~RC-17의 "
+                "20개 micro-zone으로 고정한다. 인력 배치는 Z01=LC08~12, Z02=LC13~17, "
+                "Z03=RC08~12, Z04=RC13~17의 4개 macro-zone에서 수행한다."
+            ),
+            "microzone_mapping": (
+                "각 storage location은 CC-08 x좌표를 기준으로 left/right를 결정하고, "
+                "해당 side의 08~17 active cross-aisle anchor 중 원래 storage y좌표와 "
+                "가장 가까운 micro-zone에 귀속한다. Navigation graph의 실제 route projection과는 별도다."
             ),
             "list_zone_assignment": (
                 "각 fully-valid picking list를 분할하지 않고, pick task 수가 가장 많은 "
-                "physical aisle zone에 귀속한다. 동률이면 pick units, 이후 zone 순서로 결정한다."
+                "workforce macro-zone에 귀속한다. 동률이면 pick units, 이후 zone 순서로 결정한다. "
+                "실제 worker는 기록된 pick sequence를 유지하며 필요하면 다른 macro-zone도 횡단한다."
             ),
             "allocation_workload": (
                 "zone에 귀속된 전체 picking list workload. tasks 선택 시 list 내 pick task 수, "
@@ -1365,7 +1592,7 @@ def main() -> None:
                 "0.5 * sum(|worker_share - workload_share|). 0이면 작업자 비중과 workload 비중이 동일하다."
             ),
             "worker_allocation_entropy_normalized": (
-                "zone별 작업자 수 분포의 normalized Shannon entropy. 전체 zone 수를 범주 수로 사용한다."
+                "4개 workforce macro-zone별 작업자 수 분포의 normalized Shannon entropy."
             ),
             "congestion_conflict": (
                 "Phase 2와 동일: capacity-limited edge 또는 pick node에 즉시 진입하지 못해 "
@@ -1385,8 +1612,19 @@ def main() -> None:
         },
         "phase_boundary": (
             "Phase 3는 observed baseline과 random/equal/volume_proportional 비교까지만 수행한다. "
-            "entropy_based allocation은 Phase 4에서 동일 실데이터 프레임워크에 추가한다."
+            "entropy_based allocation은 Phase 4에서 20 micro-zone 내부 집중도를 추가 반영한다."
         ),
+        "microzone_demand": {
+            "task_entropy_normalized": normalized_shannon_entropy(
+                microzone_workload(warehouse, selected_lists, basis="tasks")
+            ),
+            "unit_entropy_normalized": normalized_shannon_entropy(
+                microzone_workload(warehouse, selected_lists, basis="units")
+            ),
+            "macro_profiles": [asdict(profile) for profile in macro_zone_demand_profiles(
+                warehouse, selected_lists, zones, basis=args.volume_basis
+            )],
+        },
         "demand_entropy": asdict(demand_entropy),
     }
 
@@ -1411,8 +1649,10 @@ def main() -> None:
     print(f"Picking lists        : {len(selected_lists):,}")
     print(f"Observed operators   : {len({p.operator for p in selected_lists}):,}")
     print(f"Effective workers    : {sum(results[0].worker_counts):,}")
-    print(f"Aisle zones          : {len(zones):,}")
+    print(f"Demand micro-zones   : 20 (LC/RC-08..17)")
+    print(f"Workforce macro-zones: {len(zones):,}")
     print(f"Volume basis         : {args.volume_basis}")
+    print(f"Micro demand H       : {normalized_shannon_entropy(microzone_workload(warehouse, selected_lists, basis=args.volume_basis)):.4f}")
     print()
     print("=== Zone Workload / Worker Allocation ===")
     header = "Zone   Workload   " + "   ".join(f"{result.method:>19}" for result in results)
