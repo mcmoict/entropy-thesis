@@ -4,56 +4,133 @@ import argparse
 from dataclasses import dataclass
 from datetime import date
 import json
+import math
 from pathlib import Path
 import re
-from typing import Any
+import shutil
+import time
+from typing import Any, Callable, Iterable
 import xml.etree.ElementTree as ET
 
+import numpy as np
+
 from ..simulation.data_loader import DEFAULT_COORDINATE_UNIT, coordinate_scale_to_meter, load_dataset
-from ..simulation.phase2 import available_phase2_dates, run_phase2_simulation, select_phase2_lists
+from ..simulation.phase2 import (
+    available_phase2_dates,
+    calculate_demand_entropy,
+    select_phase2_lists,
+)
+from ..simulation.phase3 import (
+    allocate_phase3_workers,
+    build_aisle_zones,
+    classify_picking_lists_by_zone,
+    macro_zone_demand_profiles,
+    run_phase3_method,
+    run_phase3_observed_baseline,
+    zone_workload,
+)
+from ..simulation.phase4 import allocate_phase4_workers
 from ..simulation.warehouse import WarehouseGraph
+
+
+METHODS: tuple[str, ...] = ("observed", "equal", "random", "volume", "entropy")
+METHOD_LABELS: dict[str, str] = {
+    "observed": "Observed",
+    "equal": "Equal",
+    "random": "Random",
+    "volume": "Volume",
+    "entropy": "Entropy",
+}
+PHASE3_METHOD_NAMES: dict[str, str] = {
+    "equal": "equal",
+    "random": "random",
+    "volume": "volume_proportional",
+}
+DEFAULT_ENTROPY_LAMBDA = 0.25
 
 
 @dataclass(frozen=True)
 class SvgAxesTransform:
+    """Axis-aligned affine transform from warehouse raw CAD coordinates to SVG."""
+
     svg_markup: str
     view_box: str
-    axes_left: float
-    axes_right: float
-    axes_top: float
-    axes_bottom: float
-    raw_x_min: float
-    raw_x_max: float
-    raw_y_min: float
-    raw_y_max: float
+    x_scale: float
+    x_offset: float
+    y_scale: float
+    y_offset: float
+    calibration_points: int
+    max_residual_px: float
 
     def raw_to_svg(self, raw_x: float, raw_y: float) -> tuple[float, float]:
-        x_span = self.raw_x_max - self.raw_x_min
-        y_span = self.raw_y_max - self.raw_y_min
-        if x_span <= 0 or y_span <= 0:
-            raise ValueError("잘못된 raw 좌표 범위입니다.")
-
-        sx = self.axes_left + ((raw_x - self.raw_x_min) / x_span) * (
-            self.axes_right - self.axes_left
+        return (
+            float(self.x_scale * raw_x + self.x_offset),
+            float(self.y_scale * raw_y + self.y_offset),
         )
-        sy = self.axes_bottom - ((raw_y - self.raw_y_min) / y_span) * (
-            self.axes_bottom - self.axes_top
-        )
-        return float(sx), float(sy)
 
 
 def _strip_xml_declaration(svg_text: str) -> str:
     return re.sub(r"^<\?xml[^>]*>\s*", "", svg_text, count=1)
 
 
+def _fit_linear(raw_values: Iterable[float], svg_values: Iterable[float]) -> tuple[float, float, float]:
+    raw = np.asarray(tuple(raw_values), dtype=float)
+    svg = np.asarray(tuple(svg_values), dtype=float)
+    if raw.size < 2 or svg.size != raw.size:
+        raise ValueError("SVG 좌표 보정에 사용할 점이 부족합니다.")
+
+    design = np.column_stack([raw, np.ones(raw.size, dtype=float)])
+    coef, *_ = np.linalg.lstsq(design, svg, rcond=None)
+    scale, offset = float(coef[0]), float(coef[1])
+    predicted = scale * raw + offset
+    residual = float(np.max(np.abs(predicted - svg)))
+    return scale, offset, residual
+
+
+def _extract_svg_support_markers(root: ET.Element) -> list[tuple[float, float]]:
+    """Extract the 44 gray support-point marker coordinates from Layout_Z1.0.svg.
+
+    The supplied SVG is a Matplotlib export. Support points are rendered as gray
+    <use> markers with explicit x/y values. Using those plotted marker positions
+    allows the animation coordinates to be calibrated against the drawing itself,
+    rather than stretching data min/max values to the axes rectangle.
+    """
+
+    markers: list[tuple[float, float]] = []
+    for element in root.iter():
+        if not element.tag.endswith("use"):
+            continue
+        x = element.attrib.get("x")
+        y = element.attrib.get("y")
+        if x is None or y is None:
+            continue
+        style = element.attrib.get("style", "").lower().replace(" ", "")
+        if "#d3d3d3" not in style:
+            continue
+        markers.append((float(x), float(y)))
+    return markers
+
+
 def parse_svg_axes_transform(
     svg_path: str | Path,
     *,
-    raw_x_min: float,
-    raw_x_max: float,
-    raw_y_min: float,
-    raw_y_max: float,
+    support_points: Iterable[Any],
 ) -> SvgAxesTransform:
+    """Calibrate raw warehouse coordinates from support markers embedded in SVG.
+
+    This deliberately does *not* use min/max warehouse coordinates. The previous
+    min/max mapping incorrectly placed LC workers on the left plot border. Here all
+    support points in Support_Points_Navigation.csv are paired with the actual gray
+    support markers drawn in Layout_Z1.0.svg, and two least-squares affine fits are
+    estimated:
+
+        svg_x = a_x * raw_x + b_x
+        svg_y = a_y * raw_y + b_y
+
+    The current dataset/SVG pair yields essentially zero residual and therefore
+    reproduces the actual plotted support-point positions.
+    """
+
     svg_path = Path(svg_path)
     raw_svg_text = svg_path.read_text(encoding="utf-8")
     svg_text = _strip_xml_declaration(raw_svg_text)
@@ -67,67 +144,71 @@ def parse_svg_axes_transform(
     except ET.ParseError as exc:
         raise ValueError(f"SVG XML 파싱에 실패했습니다: {svg_path}") from exc
 
-    axes_path = None
-    for element in root.iter():
-        if element.attrib.get("id") == "path2":
-            axes_path = element
-            break
-
-    if axes_path is None:
+    supports = tuple(support_points)
+    markers = _extract_svg_support_markers(root)
+    if len(markers) != len(supports):
         raise ValueError(
-            "SVG에서 axes drawing area(path2)를 찾지 못했습니다. "
-            "Layout_Z1.0.svg의 구조를 확인해 주세요."
+            "SVG support marker 수와 Support_Points_Navigation.csv 행 수가 다릅니다. "
+            f"svg_markers={len(markers)}, support_points={len(supports)}. "
+            "Layout_Z1.0.svg가 현재 데이터셋과 동일한 버전인지 확인해 주세요."
         )
 
-    path_d = axes_path.attrib.get("d")
-    if not path_d:
-        raise ValueError("SVG의 path2에서 d 좌표 정보를 찾지 못했습니다.")
+    raw_x = [float(point.raw_x) for point in supports]
+    raw_y = [float(point.raw_y) for point in supports]
+    svg_x = [point[0] for point in markers]
+    svg_y = [point[1] for point in markers]
 
-    nums = [
-        float(value)
-        for value in re.findall(r"[-+]?(?:\d*\.\d+|\d+)", path_d)
-    ]
-    if len(nums) < 8:
-        raise ValueError(f"SVG axes path 좌표 해석에 실패했습니다: {path_d}")
+    x_scale, x_offset, x_residual = _fit_linear(raw_x, svg_x)
+    y_scale, y_offset, y_residual = _fit_linear(raw_y, svg_y)
+    max_residual = max(x_residual, y_residual)
 
-    xs = [nums[0], nums[2], nums[4], nums[6]]
-    ys = [nums[1], nums[3], nums[5], nums[7]]
-    axes_left = min(xs)
-    axes_right = max(xs)
-    axes_top = min(ys)
-    axes_bottom = max(ys)
+    # If point ordering no longer matches the supplied SVG, the regression error
+    # immediately exposes it instead of silently producing a misleading animation.
+    if max_residual > 0.75:
+        raise ValueError(
+            "SVG support-point 자동 보정 오차가 너무 큽니다. "
+            f"max_residual={max_residual:.3f}px. "
+            "SVG와 Support_Points_Navigation.csv의 버전/순서를 확인해 주세요."
+        )
 
     print(
-        "[SVG] Layout axes detected | "
-        f"x={axes_left:.1f}..{axes_right:.1f}, "
-        f"y={axes_top:.1f}..{axes_bottom:.1f}"
-    )
-    print(
-        "[SVG] Warehouse raw coordinates | "
-        f"x={raw_x_min:.1f}..{raw_x_max:.1f}, "
-        f"y={raw_y_min:.1f}..{raw_y_max:.1f}"
+        "[SVG  ] Auto-calibrated from support markers | "
+        f"points={len(supports)}, "
+        f"x={x_scale:.9f}*raw+{x_offset:.6f}, "
+        f"y={y_scale:.9f}*raw+{y_offset:.6f}, "
+        f"max_residual={max_residual:.6f}px"
     )
 
     return SvgAxesTransform(
         svg_markup=svg_text,
         view_box=view_box_match.group(1),
-        axes_left=axes_left,
-        axes_right=axes_right,
-        axes_top=axes_top,
-        axes_bottom=axes_bottom,
-        raw_x_min=raw_x_min,
-        raw_x_max=raw_x_max,
-        raw_y_min=raw_y_min,
-        raw_y_max=raw_y_max,
+        x_scale=x_scale,
+        x_offset=x_offset,
+        y_scale=y_scale,
+        y_offset=y_offset,
+        calibration_points=len(supports),
+        max_residual_px=max_residual,
     )
 
 
 def _node_raw_coordinates(warehouse: WarehouseGraph) -> dict[str, tuple[float, float]]:
+    """Use original CAD coordinates where available, otherwise recover from meters."""
+
     scale = coordinate_scale_to_meter(DEFAULT_COORDINATE_UNIT)
-    result: dict[str, tuple[float, float]] = {}
+    raw_by_node: dict[str, tuple[float, float]] = {}
+
+    for point in warehouse.support_nodes:
+        node_id = warehouse.support_nodes[point]
+        attrs = warehouse.graph.nodes[node_id]
+        # Support nodes are built from SupportPoint and retain only meter values in
+        # the graph, so recover raw coordinates from the globally consistent ratio.
+        raw_by_node[node_id] = (float(attrs["x_m"]) / scale, float(attrs["y_m"]) / scale)
+
     for node_id, attrs in warehouse.graph.nodes(data=True):
-        result[node_id] = (float(attrs["x_m"]) / scale, float(attrs["y_m"]) / scale)
-    return result
+        if node_id in raw_by_node:
+            continue
+        raw_by_node[node_id] = (float(attrs["x_m"]) / scale, float(attrs["y_m"]) / scale)
+    return raw_by_node
 
 
 def _timeline_for_worker(
@@ -138,6 +219,7 @@ def _timeline_for_worker(
     default_start_node: str,
 ) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
+
     for event in worker.movement_events:
         x0, y0 = node_raw[event.from_node]
         x1, y1 = node_raw[event.to_node]
@@ -155,6 +237,7 @@ def _timeline_for_worker(
                 "to_node": event.to_node,
             }
         )
+
     for event in worker.pick_events:
         x, y = node_raw[event.node_id]
         events.append(
@@ -176,23 +259,11 @@ def _timeline_for_worker(
 
     events.sort(key=lambda item: (item["t0"], 0 if item["kind"] == "move" else 1, item["t1"]))
 
-    segments: list[dict[str, Any]] = []
+    start_x, start_y = node_raw[default_start_node]
     current_time = 0.0
-    current_x, current_y = node_raw[default_start_node]
-
-    if not events:
-        return [
-            {
-                "kind": "idle",
-                "t0": 0.0,
-                "t1": float(simulation_end_seconds),
-                "x0": current_x,
-                "y0": current_y,
-                "x1": current_x,
-                "y1": current_y,
-                "wave_number": None,
-            }
-        ]
+    current_x = start_x
+    current_y = start_y
+    segments: list[dict[str, Any]] = []
 
     for event in events:
         if event["t0"] > current_time:
@@ -209,9 +280,9 @@ def _timeline_for_worker(
                 }
             )
         segments.append(event)
-        current_time = event["t1"]
-        current_x = event["x1"]
-        current_y = event["y1"]
+        current_time = max(current_time, float(event["t1"]))
+        current_x = float(event["x1"])
+        current_y = float(event["y1"])
 
     if current_time < simulation_end_seconds:
         segments.append(
@@ -227,6 +298,19 @@ def _timeline_for_worker(
             }
         )
 
+    if not segments:
+        segments.append(
+            {
+                "kind": "idle",
+                "t0": 0.0,
+                "t1": float(simulation_end_seconds),
+                "x0": start_x,
+                "y0": start_y,
+                "x1": start_x,
+                "y1": start_y,
+                "wave_number": None,
+            }
+        )
     return segments
 
 
@@ -238,6 +322,9 @@ def build_animation_payload(
     selected_date: date,
     simulation_end_seconds: float,
     svg_transform: SvgAxesTransform,
+    method: str,
+    worker_counts: tuple[int, ...] | None = None,
+    entropy_lambda: float | None = None,
 ) -> dict[str, Any]:
     node_raw = _node_raw_coordinates(warehouse)
     default_start_node = warehouse.default_start_node()
@@ -251,13 +338,13 @@ def build_animation_payload(
             simulation_end_seconds=simulation_end_seconds,
             default_start_node=default_start_node,
         )
-        svg_segments = []
-        for seg in segments:
-            sx0, sy0 = svg_transform.raw_to_svg(seg["x0"], seg["y0"])
-            sx1, sy1 = svg_transform.raw_to_svg(seg["x1"], seg["y1"])
-            svg_seg = dict(seg)
-            svg_seg.update({"sx0": sx0, "sy0": sy0, "sx1": sx1, "sy1": sy1})
-            svg_segments.append(svg_seg)
+        svg_segments: list[dict[str, Any]] = []
+        for segment in segments:
+            sx0, sy0 = svg_transform.raw_to_svg(segment["x0"], segment["y0"])
+            sx1, sy1 = svg_transform.raw_to_svg(segment["x1"], segment["y1"])
+            item = dict(segment)
+            item.update({"sx0": sx0, "sy0": sy0, "sx1": sx1, "sy1": sy1})
+            svg_segments.append(item)
 
         workers_payload.append(
             {
@@ -273,499 +360,711 @@ def build_animation_payload(
     return {
         "meta": {
             "selected_date": selected_date.isoformat(),
+            "method": method,
+            "method_label": METHOD_LABELS[method],
             "picking_lists": len(selected_lists),
             "operators": len(workers_payload),
             "simulation_end_seconds": round(float(simulation_end_seconds), 3),
             "default_start_node": default_start_node,
+            "worker_counts": list(worker_counts) if worker_counts is not None else None,
+            "entropy_lambda": entropy_lambda,
         },
         "workers": workers_payload,
     }
 
 
-def render_animation_html(
+def _read_entropy_lambda(data_dir: Path, explicit_lambda: float | None) -> float:
+    if explicit_lambda is not None:
+        value = float(explicit_lambda)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("--entropy-lambda는 0 이상의 유한한 값이어야 합니다.")
+        return value
+
+    # data/raw -> project root/results/phase4/phase4_recommendation.json
+    project_root = data_dir.resolve().parent.parent
+    recommendation = project_root / "results" / "phase4" / "phase4_recommendation.json"
+    if recommendation.exists():
+        try:
+            payload = json.loads(recommendation.read_text(encoding="utf-8"))
+            value = float(payload["entropy_weight"])
+            if math.isfinite(value) and value >= 0:
+                print(f"[LAMBDA] Using Phase 4 recommendation λ*={value:g} from {recommendation}")
+                return value
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            pass
+
+    print(f"[LAMBDA] Phase 4 recommendation not found; using default λ={DEFAULT_ENTROPY_LAMBDA:g}")
+    return DEFAULT_ENTROPY_LAMBDA
+
+
+class GenerationProgress:
+    def __init__(self, total_dates: int, methods: tuple[str, ...]) -> None:
+        self.total_dates = total_dates
+        self.methods = methods
+        self.total_scenarios = total_dates * len(methods)
+        self.started = time.monotonic()
+        self.completed_scenarios = 0
+        self._last_print = 0.0
+
+    def callback(
+        self,
+        *,
+        date_index: int,
+        date_value: date,
+        method_index: int,
+        method: str,
+        total_lists: int,
+    ) -> Callable[[int, int, Any], None]:
+        def report(completed: int, total: int, _event: Any) -> None:
+            now = time.monotonic()
+            if completed not in {1, total} and completed % max(1, total // 10) != 0:
+                return
+            if now - self._last_print < 0.10 and completed != total:
+                return
+            self._last_print = now
+            scenario_fraction = 0.0 if total <= 0 else completed / total
+            scenario_position = self.completed_scenarios + scenario_fraction
+            overall = scenario_position / self.total_scenarios
+            elapsed = now - self.started
+            eta = 0.0 if overall <= 0 else elapsed * (1.0 - overall) / overall
+            print(
+                f"[RUN..] {overall*100:6.2f}% | "
+                f"date={date_index:>3}/{self.total_dates} {date_value.isoformat()} | "
+                f"method={METHOD_LABELS[method]:<8} {method_index}/{len(self.methods)} | "
+                f"lists={completed:>4}/{total:<4} | "
+                f"elapsed={_format_duration(elapsed)} | ETA={_format_duration(eta)}"
+            )
+        return report
+
+    def finish_scenario(self) -> None:
+        self.completed_scenarios += 1
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _simulate_date_methods(
     *,
+    warehouse: WarehouseGraph,
+    selected_date: date,
+    selected_lists: list[Any],
     svg_transform: SvgAxesTransform,
-    payload: dict[str, Any],
-    title: str,
-) -> str:
-    data_json = json.dumps(payload, ensure_ascii=False)
+    methods: tuple[str, ...],
+    entropy_lambda: float,
+    seed: int,
+    walking_speed_mps: float,
+    pick_seconds_per_unit: float,
+    edge_capacity: int,
+    pick_node_capacity: int,
+    progress: GenerationProgress,
+    date_index: int,
+) -> dict[str, Any]:
+    zones = build_aisle_zones(warehouse, number_of_zones=4)
+    assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
+    workloads = zone_workload(zones, assignments, basis="tasks")
+    demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
+    total_workers = len({item.operator for item in selected_lists})
+    if total_workers <= 0:
+        raise ValueError(f"{selected_date.isoformat()}의 작업자 수가 0입니다.")
 
-    return f"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; background: #f6f8fb; color: #1f2937; }}
-    .page {{ max-width: 1600px; margin: 0 auto; padding: 20px; }}
-    .title {{ margin-bottom: 14px; }}
-    .title h1 {{ margin: 0 0 6px 0; font-size: 24px; }}
-    .title p {{ margin: 0; color: #4b5563; }}
-    .layout {{ display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }}
-    .panel, .sidebar {{ background: white; border-radius: 14px; box-shadow: 0 4px 16px rgba(0,0,0,0.06); }}
-    .panel {{ padding: 12px; }}
-    .sidebar {{ padding: 16px; }}
-    #svg-stack {{ position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; border-radius: 10px; background: white; }}
-    #svg-stack svg {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
-    #overlay .marker circle {{ stroke: #fff; stroke-width: 2; }}
-    #overlay .marker text {{ font-size: 20px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; }}
-    .controls {{ display: grid; grid-template-columns: auto auto auto 1fr auto; gap: 12px; align-items: center; margin-top: 14px; }}
-    button, select {{ border: 1px solid #d1d5db; background: white; border-radius: 10px; padding: 8px 12px; font-size: 14px; }}
-    input[type='range'] {{ width: 100%; }}
-    .kv {{ display: grid; grid-template-columns: 110px 1fr; row-gap: 10px; column-gap: 8px; font-size: 14px; }}
-    .kv .label {{ color: #6b7280; }}
-    .legend {{ margin-top: 14px; font-size: 13px; color: #4b5563; line-height: 1.5; }}
-    #worker-list {{ margin-top: 14px; max-height: 420px; overflow: auto; border-top: 1px solid #e5e7eb; padding-top: 12px; }}
-    .worker-row {{ display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 8px; font-size: 13px; padding: 5px 0; }}
-    .dot {{ width: 12px; height: 12px; border-radius: 999px; }}
-    .small {{ color: #6b7280; font-size: 12px; }}
-    .status-box {{ margin-top: 14px; padding: 12px; background: #f9fafb; border-radius: 10px; font-size: 13px; line-height: 1.5; }}
-  </style>
-</head>
-<body>
-  <div class="page">
-    <div class="title">
-      <h1>{title}</h1>
-      <p>Layout_Z1.0.svg 배경 위에 Picking_Wave 기반 observed path를 시간순으로 재생합니다.</p>
-    </div>
-    <div class="layout">
-      <div class="panel">
-        <div id="svg-stack">
-          {svg_transform.svg_markup}
-          <svg id="overlay" viewBox="{svg_transform.view_box}" preserveAspectRatio="xMidYMid meet"></svg>
-        </div>
-        <div class="controls">
-          <button id="playBtn">▶ 재생</button>
-          <select id="speedSel">
-            <option value="0.5">0.5x</option>
-            <option value="1" selected>1x</option>
-            <option value="5">5x</option>
-            <option value="10">10x</option>
-            <option value="20">20x</option>
-            <option value="50">50x</option>
-          </select>
-          <select id="workerSel">
-            <option value="ALL">전체 작업자</option>
-          </select>
-          <input id="timeSlider" type="range" min="0" max="1" step="0.1" value="0" />
-          <div id="timeLabel">00:00:00</div>
-        </div>
-      </div>
-      <aside class="sidebar">
-        <div class="kv">
-          <div class="label">날짜</div><div id="meta-date"></div>
-          <div class="label">피킹리스트 수</div><div id="meta-lists"></div>
-          <div class="label">작업자 수</div><div id="meta-workers"></div>
-          <div class="label">총 재생시간</div><div id="meta-duration"></div>
-        </div>
-        <div class="status-box" id="statusBox"></div>
-        <div class="legend">
-          - 원형 마커는 작업자 현재 위치입니다.<br/>
-          - 이동 중에는 선형 보간으로 통로를 따라 움직입니다.<br/>
-          - Picking 구간에서는 해당 위치에 정지합니다.<br/>
-          - 특정 작업자만 선택하여 경로를 집중적으로 볼 수 있습니다.
-        </div>
-        <div id="worker-list"></div>
-      </aside>
-    </div>
-  </div>
-
-  <script id="animation-data" type="application/json">{data_json}</script>
-  <script>
-    const data = JSON.parse(document.getElementById('animation-data').textContent);
-    const duration = data.meta.simulation_end_seconds;
-    const overlay = document.getElementById('overlay');
-    const playBtn = document.getElementById('playBtn');
-    const speedSel = document.getElementById('speedSel');
-    const workerSel = document.getElementById('workerSel');
-    const timeSlider = document.getElementById('timeSlider');
-    const timeLabel = document.getElementById('timeLabel');
-    const statusBox = document.getElementById('statusBox');
-    let currentTime = 0;
-    let playing = false;
-    let lastTimestamp = null;
-    let animationHandle = null;
-    let selectedWorker = 'ALL';
-
-    timeSlider.max = String(duration);
-    document.getElementById('meta-date').textContent = data.meta.selected_date;
-    document.getElementById('meta-lists').textContent = String(data.meta.picking_lists);
-    document.getElementById('meta-workers').textContent = String(data.meta.operators);
-    document.getElementById('meta-duration').textContent = formatSeconds(duration);
-
-    function colorForIndex(index) {{
-      const hue = (index * 47) % 360;
-      return `hsl(${{hue}} 72% 55%)`;
-    }}
-
-    const markers = new Map();
-    const workerState = new Map();
-
-    function createSvg(tag) {{
-      return document.createElementNS('http://www.w3.org/2000/svg', tag);
-    }}
-
-    data.workers.forEach((worker, index) => {{
-      const group = createSvg('g');
-      group.setAttribute('class', 'marker');
-      group.dataset.workerId = worker.worker_id;
-      const circle = createSvg('circle');
-      circle.setAttribute('r', '13');
-      circle.setAttribute('fill', colorForIndex(index));
-      const text = createSvg('text');
-      text.textContent = worker.worker_id.replace('Operator_', '');
-      group.appendChild(circle);
-      group.appendChild(text);
-      overlay.appendChild(group);
-      markers.set(worker.worker_id, {{ group, circle, text, color: colorForIndex(index) }});
-      workerState.set(worker.worker_id, 0);
-
-      const opt = document.createElement('option');
-      opt.value = worker.worker_id;
-      opt.textContent = worker.worker_id;
-      workerSel.appendChild(opt);
-    }});
-
-    const workerList = document.getElementById('worker-list');
-    data.workers.forEach((worker, index) => {{
-      const row = document.createElement('div');
-      row.className = 'worker-row';
-      row.innerHTML = `<div class="dot" style="background:${{colorForIndex(index)}}"></div><div><div>${{worker.worker_id}}</div><div class="small">move=${{worker.movement_events}}, pick=${{worker.pick_events}}</div></div><div>${{worker.total_distance_m.toFixed(1)}} m</div>`;
-      workerList.appendChild(row);
-    }});
-
-    function formatSeconds(totalSeconds) {{
-      const t = Math.max(0, Math.floor(totalSeconds));
-      const h = String(Math.floor(t / 3600)).padStart(2, '0');
-      const m = String(Math.floor((t % 3600) / 60)).padStart(2, '0');
-      const s = String(t % 60).padStart(2, '0');
-      return `${{h}}:${{m}}:${{s}}`;
-    }}
-
-    function segmentAtTime(worker, timeSec) {{
-      let idx = workerState.get(worker.worker_id) || 0;
-      const segs = worker.segments;
-      while (idx > 0 && timeSec < segs[idx].t0) idx -= 1;
-      while (idx < segs.length - 1 && timeSec > segs[idx].t1) idx += 1;
-      workerState.set(worker.worker_id, idx);
-      return segs[idx];
-    }}
-
-    function positionFromSegment(seg, timeSec) {{
-      if (seg.t1 <= seg.t0 || seg.kind !== 'move') {{
-        return {{ x: seg.sx1, y: seg.sy1 }};
-      }}
-      const ratio = Math.max(0, Math.min(1, (timeSec - seg.t0) / (seg.t1 - seg.t0)));
-      return {{
-        x: seg.sx0 + (seg.sx1 - seg.sx0) * ratio,
-        y: seg.sy0 + (seg.sy1 - seg.sy0) * ratio,
-      }};
-    }}
-
-    function updateStatus(activeItems) {{
-      const lines = [];
-      lines.push(`<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}`);
-      lines.push(`<strong>표시 작업자</strong> : ${{selectedWorker === 'ALL' ? '전체' : selectedWorker}}`);
-      lines.push(`<strong>활성 마커 수</strong> : ${{activeItems.length}}`);
-      if (activeItems.length > 0) {{
-        const preview = activeItems.slice(0, 6).map(item => `${{item.workerId}}(${{item.kind}})`).join(', ');
-        lines.push(`<strong>상태</strong> : ${{preview}}${{activeItems.length > 6 ? ' ...' : ''}}`);
-      }}
-      statusBox.innerHTML = lines.join('<br/>');
-    }}
-
-    function render() {{
-      timeSlider.value = String(currentTime);
-      timeLabel.textContent = formatSeconds(currentTime);
-      const activeItems = [];
-
-      data.workers.forEach((worker) => {{
-        const marker = markers.get(worker.worker_id);
-        const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
-        marker.group.style.display = visible ? '' : 'none';
-        if (!visible) return;
-
-        const seg = segmentAtTime(worker, currentTime);
-        const pos = positionFromSegment(seg, currentTime);
-        marker.circle.setAttribute('cx', pos.x.toFixed(2));
-        marker.circle.setAttribute('cy', pos.y.toFixed(2));
-        marker.text.setAttribute('x', pos.x.toFixed(2));
-        marker.text.setAttribute('y', pos.y.toFixed(2));
-        marker.group.setAttribute('opacity', seg.kind === 'idle' ? '0.65' : '1.0');
-        activeItems.push({{ workerId: worker.worker_id, kind: seg.kind }});
-      }});
-
-      updateStatus(activeItems);
-    }}
-
-    function tick(timestamp) {{
-      if (!playing) return;
-      if (lastTimestamp == null) lastTimestamp = timestamp;
-      const deltaMs = timestamp - lastTimestamp;
-      lastTimestamp = timestamp;
-      const speed = parseFloat(speedSel.value || '1');
-      currentTime += (deltaMs / 1000.0) * speed;
-      if (currentTime >= duration) {{
-        currentTime = duration;
-        playing = false;
-        playBtn.textContent = '▶ 재생';
-      }}
-      render();
-      if (playing) animationHandle = requestAnimationFrame(tick);
-    }}
-
-    playBtn.addEventListener('click', () => {{
-      playing = !playing;
-      playBtn.textContent = playing ? '⏸ 일시정지' : '▶ 재생';
-      lastTimestamp = null;
-      if (playing) animationHandle = requestAnimationFrame(tick);
-      else if (animationHandle) cancelAnimationFrame(animationHandle);
-    }});
-
-    timeSlider.addEventListener('input', (e) => {{
-      currentTime = parseFloat(e.target.value || '0');
-      render();
-    }});
-
-    workerSel.addEventListener('change', (e) => {{
-      selectedWorker = e.target.value;
-      render();
-    }});
-
-    render();
-  </script>
-</body>
-</html>
-"""
-
-
-def generate_observed_picking_animation(
-    *,
-    data_dir: str | Path,
-    layout_svg: str | Path,
-    output_html: str | Path,
-    target_date: date | None,
-    max_lists: int | None,
-    walking_speed_mps: float = 1.2,
-    pick_seconds_per_unit: float = 3.0,
-    edge_capacity: int = 1,
-    pick_node_capacity: int = 1,
-    return_to_io: bool = True,
-) -> Path:
-    data_dir = Path(data_dir)
-    output_html = Path(output_html)
-
-    bundle = load_dataset(data_dir)
-    warehouse = WarehouseGraph.build(
-        bundle.storage_locations,
-        bundle.support_points,
-        deterministic_order=True,
-    )
-    selected_date, selected_lists = select_phase2_lists(
-        warehouse,
-        bundle.picking_lists,
-        target_date=target_date,
-        max_lists=max_lists,
-    )
-
-    workers, _traffic, _executions, _entropy_samples, _cell_metrics, _origin, sim_end = run_phase2_simulation(
+    profiles = macro_zone_demand_profiles(
         warehouse,
         selected_lists,
-        walking_speed_mps=walking_speed_mps,
-        pick_seconds_per_unit=pick_seconds_per_unit,
-        edge_capacity=edge_capacity,
-        pick_node_capacity=pick_node_capacity,
-        return_to_io=return_to_io,
+        zones,
+        basis="tasks",
     )
+    concentrations = tuple(profile.microzone_concentration for profile in profiles)
 
-    raw_x_values = [loc.raw_x for loc in bundle.storage_locations] + [p.raw_x for p in bundle.support_points]
-    raw_y_values = [loc.raw_y for loc in bundle.storage_locations] + [p.raw_y for p in bundle.support_points]
-    svg_transform = parse_svg_axes_transform(
-        layout_svg,
-        raw_x_min=min(raw_x_values),
-        raw_x_max=max(raw_x_values),
-        raw_y_min=min(raw_y_values),
-        raw_y_max=max(raw_y_values),
-    )
+    result: dict[str, Any] = {}
+    for method_index, method in enumerate(methods, start=1):
+        callback = progress.callback(
+            date_index=date_index,
+            date_value=selected_date,
+            method_index=method_index,
+            method=method,
+            total_lists=len(selected_lists),
+        )
+        print(
+            f"[START] date={date_index:>3}/{progress.total_dates} {selected_date.isoformat()} | "
+            f"method={METHOD_LABELS[method]} | lists={len(selected_lists)} | workers={total_workers}"
+        )
 
-    payload = build_animation_payload(
-        warehouse=warehouse,
-        workers=workers,
-        selected_lists=selected_lists,
-        selected_date=selected_date,
-        simulation_end_seconds=sim_end,
-        svg_transform=svg_transform,
-    )
-    title = f"Observed Picking Animation | {selected_date.isoformat()}"
-    html = render_animation_html(svg_transform=svg_transform, payload=payload, title=title)
+        if method == "observed":
+            simulation = run_phase3_observed_baseline(
+                warehouse,
+                selected_lists,
+                zones,
+                assignments,
+                selected_date=selected_date,
+                demand_entropy=demand_entropy,
+                walking_speed_mps=walking_speed_mps,
+                pick_seconds_per_unit=pick_seconds_per_unit,
+                edge_capacity=edge_capacity,
+                pick_node_capacity=pick_node_capacity,
+                sample_seconds=5.0,
+                return_to_io=True,
+                volume_basis="tasks",
+                progress_callback=callback,
+            )
+            counts = None
+            lambda_value = None
+        elif method in {"equal", "random", "volume"}:
+            canonical = PHASE3_METHOD_NAMES[method]
+            counts = allocate_phase3_workers(
+                canonical,
+                total_workers=total_workers,
+                workloads=workloads,
+                seed=seed,
+                minimum_per_active_zone=1,
+            )
+            simulation = run_phase3_method(
+                warehouse,
+                selected_lists,
+                zones,
+                assignments,
+                method=canonical,
+                worker_counts=counts,
+                selected_date=selected_date,
+                demand_entropy=demand_entropy,
+                seed=seed,
+                walking_speed_mps=walking_speed_mps,
+                pick_seconds_per_unit=pick_seconds_per_unit,
+                edge_capacity=edge_capacity,
+                pick_node_capacity=pick_node_capacity,
+                sample_seconds=5.0,
+                return_to_io=True,
+                volume_basis="tasks",
+                progress_callback=callback,
+            )
+            lambda_value = None
+        else:
+            counts = allocate_phase4_workers(
+                total_workers=total_workers,
+                workloads=workloads,
+                entropy_weight=entropy_lambda,
+                microzone_concentrations=concentrations,
+                minimum_per_active_zone=1,
+            )
+            simulation = run_phase3_method(
+                warehouse,
+                selected_lists,
+                zones,
+                assignments,
+                method=f"entropy_lambda_{entropy_lambda:g}",
+                worker_counts=counts,
+                selected_date=selected_date,
+                demand_entropy=demand_entropy,
+                seed=seed,
+                walking_speed_mps=walking_speed_mps,
+                pick_seconds_per_unit=pick_seconds_per_unit,
+                edge_capacity=edge_capacity,
+                pick_node_capacity=pick_node_capacity,
+                sample_seconds=5.0,
+                return_to_io=True,
+                volume_basis="tasks",
+                progress_callback=callback,
+            )
+            lambda_value = entropy_lambda
 
-    output_html.parent.mkdir(parents=True, exist_ok=True)
-    output_html.write_text(html, encoding="utf-8")
-    return output_html
+        sim_end = float(simulation.summary.simulation_elapsed_seconds)
+        result[method] = build_animation_payload(
+            warehouse=warehouse,
+            workers=simulation.workers,
+            selected_lists=selected_lists,
+            selected_date=selected_date,
+            simulation_end_seconds=sim_end,
+            svg_transform=svg_transform,
+            method=method,
+            worker_counts=counts,
+            entropy_lambda=lambda_value,
+        )
+        progress.finish_scenario()
+
+    return result
 
 
-
-def render_date_selector_html(
+def render_single_html(
     *,
-    date_files: list[tuple[str, str]],
-    title: str = "Observed Picking Animation | All Dates",
+    svg_transform: SvgAxesTransform,
+    all_data: dict[str, Any],
+    entropy_lambda: float,
 ) -> str:
-    if not date_files:
-        raise ValueError("날짜별 animation 파일이 없습니다.")
-
-    options = "\n".join(
-        f'<option value="{relative_path}">{date_text}</option>'
-        for date_text, relative_path in date_files
+    data_json = json.dumps(all_data, ensure_ascii=False, separators=(",", ":"))
+    method_options = "\n".join(
+        f'<option value="{method}">{METHOD_LABELS[method]}</option>' for method in METHODS
     )
-    first_path = date_files[0][1]
-    return f"""<!DOCTYPE html>
+
+    return f'''<!DOCTYPE html>
 <html lang="ko">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title}</title>
-  <style>
-    html, body {{ margin: 0; min-height: 100%; font-family: Arial, sans-serif; background: #f6f8fb; color: #1f2937; }}
-    .toolbar {{ position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 18px; background: #ffffff; border-bottom: 1px solid #e5e7eb; box-shadow: 0 2px 8px rgba(0,0,0,.05); }}
-    .toolbar strong {{ margin-right: 8px; }}
-    select {{ min-width: 180px; padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 9px; background: white; font-size: 14px; }}
-    .meta {{ color: #6b7280; font-size: 13px; }}
-    iframe {{ display: block; width: 100%; height: 92vh; border: 0; background: white; }}
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Warehouse Picking Animation</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; min-height: 100%; font-family: Arial, "Noto Sans KR", sans-serif; background: #f3f6fa; color: #172033; }}
+  .app {{ width: 100%; padding: 18px 20px 26px; }}
+  .layout {{ display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; align-items: start; max-width: 1680px; margin: 0 auto; }}
+  .visual-panel {{ min-width: 0; background: #fff; border-radius: 14px; box-shadow: 0 5px 22px rgba(15,23,42,.06); padding: 10px; }}
+  #svg-stack {{ position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: #fff; border-radius: 10px; }}
+  #svg-stack > svg {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
+  #overlay .marker circle {{ stroke: #fff; stroke-width: 2.2; }}
+  #overlay .marker text {{ font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; }}
+  .controls {{ display: grid; grid-template-columns: auto 76px 150px minmax(120px,1fr) 74px; gap: 9px; align-items: center; padding: 8px 0 0; }}
+  button, select {{ min-height: 38px; border: 1px solid #d6dce5; border-radius: 9px; background: #fff; color: #172033; padding: 7px 10px; font-size: 14px; }}
+  button {{ cursor: pointer; white-space: nowrap; }}
+  input[type="range"] {{ width: 100%; }}
+  #timeLabel {{ font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; }}
+  .sidebar {{ background: #fff; border-radius: 14px; box-shadow: 0 5px 22px rgba(15,23,42,.07); padding: 14px 15px 16px; min-width: 0; }}
+  .kv {{ display: grid; grid-template-columns: 108px minmax(0,1fr); gap: 10px 8px; align-items: center; font-size: 14px; }}
+  .key {{ color: #667085; }}
+  .value {{ min-width: 0; font-variant-numeric: tabular-nums; }}
+  .sidebar select {{ width: 100%; min-width: 0; }}
+  .status {{ margin-top: 13px; background: #f7f9fc; border-radius: 11px; padding: 12px; font-size: 13px; line-height: 1.45; }}
+  .notes {{ margin-top: 14px; padding-bottom: 13px; border-bottom: 1px solid #e5e7eb; color: #455065; font-size: 12.5px; line-height: 1.5; }}
+  .workers {{ margin-top: 12px; max-height: 430px; overflow: auto; }}
+  .worker-row {{ display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 6px 0; font-size: 12.5px; }}
+  .dot {{ width: 11px; height: 11px; border-radius: 50%; }}
+  .worker-name {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .worker-sub {{ color: #697386; font-size: 11px; }}
+  .distance {{ white-space: nowrap; font-variant-numeric: tabular-nums; }}
+  .allocation {{ margin-top: 8px; color: #697386; font-size: 11px; line-height: 1.4; }}
+  @media (max-width: 980px) {{
+    .layout {{ grid-template-columns: 1fr; }}
+    .sidebar {{ order: -1; }}
+    .workers {{ max-height: 230px; }}
+  }}
+  @media (max-width: 650px) {{
+    .app {{ padding: 8px; }}
+    .controls {{ grid-template-columns: 1fr 1fr; }}
+    .controls input[type="range"] {{ grid-column: 1 / -1; }}
+    #timeLabel {{ text-align: left; }}
+  }}
+</style>
 </head>
 <body>
-  <div class="toolbar">
-    <strong>날짜 선택</strong>
-    <select id="dateSelect" aria-label="애니메이션 날짜 선택">
-      {options}
-    </select>
-    <span class="meta">총 {len(date_files)}개 날짜 · 선택 즉시 해당 날짜 애니메이션으로 전환됩니다.</span>
+<div class="app">
+  <div class="layout">
+    <main class="visual-panel">
+      <div id="svg-stack">
+        {svg_transform.svg_markup}
+        <svg id="overlay" viewBox="{svg_transform.view_box}" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div class="controls">
+        <button id="playBtn" type="button">▶ 재생</button>
+        <select id="speedSel" aria-label="재생 배속">
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="5">5x</option>
+          <option value="10">10x</option>
+          <option value="20">20x</option>
+          <option value="50">50x</option>
+        </select>
+        <select id="workerSel" aria-label="작업자 선택"><option value="ALL">전체 작업자</option></select>
+        <input id="timeSlider" type="range" min="0" max="1" step="0.1" value="0" aria-label="재생 시간" />
+        <div id="timeLabel">00:00:00</div>
+      </div>
+    </main>
+
+    <aside class="sidebar">
+      <div class="kv">
+        <div class="key">날짜</div><div class="value"><select id="dateSel" aria-label="날짜 선택"></select></div>
+        <div class="key">방법</div><div class="value"><select id="methodSel" aria-label="배치 방법">{method_options}</select></div>
+        <div class="key">피킹리스트 수</div><div class="value" id="metaLists"></div>
+        <div class="key">작업자 수</div><div class="value" id="metaWorkers"></div>
+        <div class="key">총 재생시간</div><div class="value" id="metaDuration"></div>
+      </div>
+      <div class="allocation" id="allocationInfo"></div>
+      <div class="status" id="statusBox"></div>
+      <div class="notes">
+        - 원형 마커는 작업자 현재 위치입니다.<br />
+        - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
+        - 이동 중에는 graph edge를 따라 선형 보간합니다.<br />
+        - 날짜가 끝나면 같은 방법으로 다음 날짜가 자동 재생됩니다.<br />
+        - Entropy는 λ*={entropy_lambda:g}를 사용합니다.
+      </div>
+      <div class="workers" id="workerList"></div>
+    </aside>
   </div>
-  <iframe id="animationFrame" src="{first_path}" title="Picking animation"></iframe>
-  <script>
-    const dateSelect = document.getElementById('dateSelect');
-    const animationFrame = document.getElementById('animationFrame');
-    dateSelect.addEventListener('change', () => {{
-      animationFrame.src = dateSelect.value;
+</div>
+<script id="animationData" type="application/json">{data_json}</script>
+<script>
+(() => {{
+  const rootData = JSON.parse(document.getElementById('animationData').textContent);
+  const dates = rootData.date_order;
+  const scenarios = rootData.dates;
+  const overlay = document.getElementById('overlay');
+  const dateSel = document.getElementById('dateSel');
+  const methodSel = document.getElementById('methodSel');
+  const workerSel = document.getElementById('workerSel');
+  const speedSel = document.getElementById('speedSel');
+  const playBtn = document.getElementById('playBtn');
+  const slider = document.getElementById('timeSlider');
+  const timeLabel = document.getElementById('timeLabel');
+  const workerList = document.getElementById('workerList');
+  const statusBox = document.getElementById('statusBox');
+  const allocationInfo = document.getElementById('allocationInfo');
+
+  dates.forEach(d => {{
+    const opt = document.createElement('option');
+    opt.value = d; opt.textContent = d; dateSel.appendChild(opt);
+  }});
+
+  let currentDate = dates[0];
+  let currentMethod = 'observed';
+  let scenario = null;
+  let currentTime = 0;
+  let playing = false;
+  let raf = null;
+  let lastTs = null;
+  let selectedWorker = 'ALL';
+  let markerMap = new Map();
+  let workerIndices = new Map();
+
+  function formatSeconds(value) {{
+    const total = Math.max(0, Math.floor(Number(value) || 0));
+    const h = String(Math.floor(total / 3600)).padStart(2, '0');
+    const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
+    const s = String(total % 60).padStart(2, '0');
+    return `${{h}}:${{m}}:${{s}}`;
+  }}
+
+  function colorForIndex(i) {{ return `hsl(${{(i * 47) % 360}} 70% 52%)`; }}
+  function svgNode(tag) {{ return document.createElementNS('http://www.w3.org/2000/svg', tag); }}
+  function shortWorkerLabel(id, index) {{
+    const observed = id.match(/Operator_(\\d+)/i);
+    if (observed) return observed[1];
+    return String(index + 1).padStart(2, '0');
+  }}
+
+  function stop() {{
+    playing = false;
+    playBtn.textContent = '▶ 재생';
+    lastTs = null;
+    if (raf !== null) cancelAnimationFrame(raf);
+    raf = null;
+  }}
+
+  function start() {{
+    if (!scenario) return;
+    if (currentTime >= scenario.meta.simulation_end_seconds) currentTime = 0;
+    if (playing) return;
+    playing = true;
+    playBtn.textContent = '⏸ 일시정지';
+    lastTs = null;
+    raf = requestAnimationFrame(tick);
+  }}
+
+  function rebuildWorkers() {{
+    overlay.innerHTML = '';
+    workerSel.innerHTML = '<option value="ALL">전체 작업자</option>';
+    workerList.innerHTML = '';
+    markerMap = new Map();
+    workerIndices = new Map();
+
+    scenario.workers.forEach((worker, index) => {{
+      workerIndices.set(worker.worker_id, 0);
+      const color = colorForIndex(index);
+      const g = svgNode('g'); g.setAttribute('class', 'marker');
+      const c = svgNode('circle'); c.setAttribute('r', '12'); c.setAttribute('fill', color);
+      const t = svgNode('text'); t.textContent = shortWorkerLabel(worker.worker_id, index);
+      g.appendChild(c); g.appendChild(t); overlay.appendChild(g);
+      markerMap.set(worker.worker_id, {{ g, c, t }});
+
+      const option = document.createElement('option');
+      option.value = worker.worker_id; option.textContent = worker.worker_id; workerSel.appendChild(option);
+
+      const row = document.createElement('div'); row.className = 'worker-row';
+      row.innerHTML = `<div class="dot" style="background:${{color}}"></div>` +
+        `<div><div class="worker-name" title="${{worker.worker_id}}">${{worker.worker_id}}</div>` +
+        `<div class="worker-sub">move=${{worker.movement_events}}, pick=${{worker.pick_events}}</div></div>` +
+        `<div class="distance">${{worker.total_distance_m.toFixed(1)}} m</div>`;
+      workerList.appendChild(row);
     }});
-  </script>
+    selectedWorker = 'ALL';
+  }}
+
+  function findSegment(worker, t) {{
+    const segs = worker.segments;
+    let idx = workerIndices.get(worker.worker_id) || 0;
+    while (idx > 0 && t < segs[idx].t0) idx--;
+    while (idx < segs.length - 1 && t > segs[idx].t1) idx++;
+    workerIndices.set(worker.worker_id, idx);
+    return segs[idx];
+  }}
+
+  function position(seg, t) {{
+    if (seg.kind !== 'move' || seg.t1 <= seg.t0) return {{x: seg.sx1, y: seg.sy1}};
+    const r = Math.max(0, Math.min(1, (t - seg.t0) / (seg.t1 - seg.t0)));
+    return {{x: seg.sx0 + (seg.sx1 - seg.sx0) * r, y: seg.sy0 + (seg.sy1 - seg.sy0) * r}};
+  }}
+
+  function render() {{
+    if (!scenario) return;
+    slider.value = String(currentTime);
+    timeLabel.textContent = formatSeconds(currentTime);
+    const states = [];
+
+    scenario.workers.forEach(worker => {{
+      const marker = markerMap.get(worker.worker_id);
+      const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
+      marker.g.style.display = visible ? '' : 'none';
+      if (!visible) return;
+      const seg = findSegment(worker, currentTime);
+      const p = position(seg, currentTime);
+      marker.c.setAttribute('cx', p.x.toFixed(3)); marker.c.setAttribute('cy', p.y.toFixed(3));
+      marker.t.setAttribute('x', p.x.toFixed(3)); marker.t.setAttribute('y', p.y.toFixed(3));
+      marker.g.setAttribute('opacity', seg.kind === 'idle' ? '0.68' : '1');
+      states.push(`${{worker.worker_id}}(${{seg.kind}})`);
+    }});
+
+    statusBox.innerHTML = `<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}<br>` +
+      `<strong>표시 작업자</strong> : ${{selectedWorker === 'ALL' ? '전체' : selectedWorker}}<br>` +
+      `<strong>활성 마커 수</strong> : ${{states.length}}<br>` +
+      `<strong>상태</strong> : ${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`;
+  }}
+
+  function loadScenario(dateValue, methodValue, autoPlay) {{
+    stop();
+    currentDate = dateValue;
+    currentMethod = methodValue;
+    scenario = scenarios[currentDate][currentMethod];
+    dateSel.value = currentDate;
+    methodSel.value = currentMethod;
+    currentTime = 0;
+    slider.max = String(scenario.meta.simulation_end_seconds);
+    slider.value = '0';
+    document.getElementById('metaLists').textContent = scenario.meta.picking_lists;
+    document.getElementById('metaWorkers').textContent = scenario.meta.operators;
+    document.getElementById('metaDuration').textContent = formatSeconds(scenario.meta.simulation_end_seconds);
+    const counts = scenario.meta.worker_counts;
+    let allocationText = '';
+    if (Array.isArray(counts)) allocationText += `구역 인원: [${{counts.join(', ')}}]`;
+    if (scenario.meta.entropy_lambda !== null) allocationText += `${{allocationText ? ' · ' : ''}}λ=${{scenario.meta.entropy_lambda}}`;
+    allocationInfo.textContent = allocationText;
+    rebuildWorkers();
+    render();
+    if (autoPlay) start();
+  }}
+
+  function advanceDate() {{
+    const idx = dates.indexOf(currentDate);
+    if (idx < 0 || idx >= dates.length - 1) {{ stop(); return; }}
+    loadScenario(dates[idx + 1], currentMethod, true);
+  }}
+
+  function tick(ts) {{
+    if (!playing) return;
+    if (lastTs === null) lastTs = ts;
+    const dt = (ts - lastTs) / 1000;
+    lastTs = ts;
+    currentTime += dt * Number(speedSel.value || 1);
+    if (currentTime >= scenario.meta.simulation_end_seconds) {{
+      currentTime = scenario.meta.simulation_end_seconds;
+      render();
+      advanceDate();
+      return;
+    }}
+    render();
+    raf = requestAnimationFrame(tick);
+  }}
+
+  playBtn.addEventListener('click', () => playing ? stop() : start());
+  speedSel.addEventListener('change', () => {{ lastTs = null; }});
+  workerSel.addEventListener('change', e => {{ selectedWorker = e.target.value; render(); }});
+  slider.addEventListener('input', e => {{ currentTime = Number(e.target.value || 0); render(); }});
+  dateSel.addEventListener('change', e => loadScenario(e.target.value, currentMethod, true));
+  methodSel.addEventListener('change', e => loadScenario(currentDate, e.target.value, true));
+
+  loadScenario(currentDate, currentMethod, false);
+}})();
+</script>
 </body>
-</html>
-"""
+</html>'''
 
 
-def generate_all_dates_animation_site(
+def _remove_legacy_date_directories(output_html: Path) -> None:
+    parent = output_html.parent
+    if not parent.exists():
+        return
+    for path in parent.iterdir():
+        if path.is_dir() and path.name.endswith("_dates"):
+            print(f"[CLEAN] Removing legacy date directory: {path}")
+            shutil.rmtree(path)
+
+
+def generate_all_dates_single_html(
     *,
     data_dir: str | Path,
     layout_svg: str | Path,
     output_html: str | Path,
     max_lists: int | None,
+    entropy_lambda: float | None,
+    seed: int = 42,
     walking_speed_mps: float = 1.2,
     pick_seconds_per_unit: float = 3.0,
     edge_capacity: int = 1,
     pick_node_capacity: int = 1,
-    return_to_io: bool = True,
 ) -> Path:
     data_dir = Path(data_dir)
     output_html = Path(output_html)
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_date_directories(output_html)
 
+    print("[MODE ] Single HTML + embedded date/method JSON (no per-date HTML)")
+    print(f"[LOAD ] Loading dataset: {data_dir}")
     bundle = load_dataset(data_dir)
+    print("[GRAPH] Building deterministic warehouse graph")
     warehouse = WarehouseGraph.build(
         bundle.storage_locations,
         bundle.support_points,
         deterministic_order=True,
     )
+    transform = parse_svg_axes_transform(
+        layout_svg,
+        support_points=bundle.support_points,
+    )
+    selected_lambda = _read_entropy_lambda(data_dir, entropy_lambda)
+
     dates = available_phase2_dates(warehouse, bundle.picking_lists)
     if not dates:
         raise ValueError("애니메이션으로 생성할 fully-valid 날짜가 없습니다.")
 
-    raw_x_values = [loc.raw_x for loc in bundle.storage_locations] + [p.raw_x for p in bundle.support_points]
-    raw_y_values = [loc.raw_y for loc in bundle.storage_locations] + [p.raw_y for p in bundle.support_points]
-    svg_transform = parse_svg_axes_transform(
-        layout_svg,
-        raw_x_min=min(raw_x_values),
-        raw_x_max=max(raw_x_values),
-        raw_y_min=min(raw_y_values),
-        raw_y_max=max(raw_y_values),
-    )
-
-    output_html.parent.mkdir(parents=True, exist_ok=True)
-    date_dir = output_html.parent / f"{output_html.stem}_dates"
-    date_dir.mkdir(parents=True, exist_ok=True)
-
-    date_files: list[tuple[str, str]] = []
-    total_dates = len(dates)
-    print(f"[START] Generating observed animations for {total_dates} dates")
-
-    for index, target_date in enumerate(dates, start=1):
-        print(f"[RUN  ] {index:>3}/{total_dates} | {target_date.isoformat()}")
+    progress = GenerationProgress(len(dates), METHODS)
+    date_payloads: dict[str, Any] = {}
+    for date_index, target_date in enumerate(dates, start=1):
         selected_date, selected_lists = select_phase2_lists(
             warehouse,
             bundle.picking_lists,
             target_date=target_date,
             max_lists=max_lists,
         )
-
-        workers, _traffic, _executions, _entropy_samples, _cell_metrics, _origin, sim_end = run_phase2_simulation(
-            warehouse,
-            selected_lists,
+        date_payloads[selected_date.isoformat()] = _simulate_date_methods(
+            warehouse=warehouse,
+            selected_date=selected_date,
+            selected_lists=selected_lists,
+            svg_transform=transform,
+            methods=METHODS,
+            entropy_lambda=selected_lambda,
+            seed=seed,
             walking_speed_mps=walking_speed_mps,
             pick_seconds_per_unit=pick_seconds_per_unit,
             edge_capacity=edge_capacity,
             pick_node_capacity=pick_node_capacity,
-            return_to_io=return_to_io,
+            progress=progress,
+            date_index=date_index,
         )
 
-        payload = build_animation_payload(
-            warehouse=warehouse,
-            workers=workers,
-            selected_lists=selected_lists,
-            selected_date=selected_date,
-            simulation_end_seconds=sim_end,
-            svg_transform=svg_transform,
-        )
-        title = f"Observed Picking Animation | {selected_date.isoformat()}"
-        html = render_animation_html(
-            svg_transform=svg_transform,
-            payload=payload,
-            title=title,
-        )
+    all_data = {
+        "meta": {
+            "format": "single-html-date-method-json-v2",
+            "entropy_lambda": selected_lambda,
+            "seed": seed,
+            "coordinate_calibration_points": transform.calibration_points,
+            "coordinate_max_residual_px": transform.max_residual_px,
+        },
+        "date_order": [value.isoformat() for value in dates],
+        "dates": date_payloads,
+    }
 
-        filename = f"observed_picking_animation_{selected_date.isoformat()}.html"
-        date_output = date_dir / filename
-        date_output.write_text(html, encoding="utf-8")
-        relative_path = date_output.relative_to(output_html.parent).as_posix()
-        date_files.append((selected_date.isoformat(), relative_path))
-
-    selector_html = render_date_selector_html(date_files=date_files)
-    output_html.write_text(selector_html, encoding="utf-8")
-    print(f"[DONE] Date selector HTML saved to: {output_html}")
-    print(f"[DONE] Date animation files saved under: {date_dir}")
+    print(f"[PACK ] Serializing {len(dates)} dates × {len(METHODS)} methods into one HTML")
+    html = render_single_html(
+        svg_transform=transform,
+        all_data=all_data,
+        entropy_lambda=selected_lambda,
+    )
+    output_html.write_text(html, encoding="utf-8")
+    size_mb = output_html.stat().st_size / (1024 * 1024)
+    elapsed = time.monotonic() - progress.started
+    print(f"[WRITE] {output_html} | size={size_mb:.1f} MB")
+    print(f"[DONE ] {len(dates)} dates × {len(METHODS)} methods | elapsed={_format_duration(elapsed)}")
+    print("[DONE ] Exactly one HTML was generated; all scenario data is embedded JSON.")
     return output_html
+
+
+def generate_single_date_html(
+    *,
+    data_dir: str | Path,
+    layout_svg: str | Path,
+    output_html: str | Path,
+    target_date: date,
+    max_lists: int | None,
+    entropy_lambda: float | None,
+    seed: int = 42,
+    walking_speed_mps: float = 1.2,
+    pick_seconds_per_unit: float = 3.0,
+    edge_capacity: int = 1,
+    pick_node_capacity: int = 1,
+) -> Path:
+    data_dir = Path(data_dir)
+    output_html = Path(output_html)
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_date_directories(output_html)
+
+    bundle = load_dataset(data_dir)
+    warehouse = WarehouseGraph.build(
+        bundle.storage_locations,
+        bundle.support_points,
+        deterministic_order=True,
+    )
+    transform = parse_svg_axes_transform(layout_svg, support_points=bundle.support_points)
+    selected_lambda = _read_entropy_lambda(data_dir, entropy_lambda)
+    selected_date, selected_lists = select_phase2_lists(
+        warehouse,
+        bundle.picking_lists,
+        target_date=target_date,
+        max_lists=max_lists,
+    )
+    progress = GenerationProgress(1, METHODS)
+    methods_data = _simulate_date_methods(
+        warehouse=warehouse,
+        selected_date=selected_date,
+        selected_lists=selected_lists,
+        svg_transform=transform,
+        methods=METHODS,
+        entropy_lambda=selected_lambda,
+        seed=seed,
+        walking_speed_mps=walking_speed_mps,
+        pick_seconds_per_unit=pick_seconds_per_unit,
+        edge_capacity=edge_capacity,
+        pick_node_capacity=pick_node_capacity,
+        progress=progress,
+        date_index=1,
+    )
+    all_data = {
+        "meta": {"format": "single-html-date-method-json-v2", "entropy_lambda": selected_lambda, "seed": seed},
+        "date_order": [selected_date.isoformat()],
+        "dates": {selected_date.isoformat(): methods_data},
+    }
+    output_html.write_text(
+        render_single_html(svg_transform=transform, all_data=all_data, entropy_lambda=selected_lambda),
+        encoding="utf-8",
+    )
+    print(f"[DONE ] Single-date HTML saved to: {output_html}")
+    return output_html
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate observed picking animation HTML on top of Layout_Z1.0.svg"
+        description=(
+            "Generate a single interactive warehouse picking animation HTML with "
+            "Observed/Equal/Random/Volume/Entropy method switching."
+        )
     )
-    parser.add_argument("--data-dir", default="data/raw", help="directory containing CSV data files")
-    parser.add_argument(
-        "--layout-svg",
-        default="data/raw_original/Layout_Z1.0.svg",
-        help="warehouse layout SVG used as the animation background",
-    )
-    parser.add_argument(
-        "--output-html",
-        default="results/figures/observed_picking_animation.html",
-        help="output standalone HTML path (or all-dates selector page with --all-dates)",
-    )
-    parser.add_argument("--date", default=None, help="target date in YYYY-MM-DD format")
-    parser.add_argument(
-        "--all-dates",
-        action="store_true",
-        help="generate every available date and a select-box index page",
-    )
-    parser.add_argument("--max-lists", type=int, default=None, help="optional cap for quick testing")
+    parser.add_argument("--data-dir", default="data/raw")
+    parser.add_argument("--layout-svg", default="data/raw_original/Layout_Z1.0.svg")
+    parser.add_argument("--output-html", default="results/figures/observed_picking_animation.html")
+    parser.add_argument("--date", default=None, help="YYYY-MM-DD; omit with --all-dates")
+    parser.add_argument("--all-dates", action="store_true")
+    parser.add_argument("--max-lists", type=int, default=None, help="quick-test limit per date")
+    parser.add_argument("--entropy-lambda", type=float, default=None, help="override Phase 4 λ*")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--walking-speed-mps", type=float, default=1.2)
     parser.add_argument("--pick-seconds-per-unit", type=float, default=3.0)
     parser.add_argument("--edge-capacity", type=int, default=1)
@@ -777,34 +1076,25 @@ def main() -> None:
     args = _parse_args()
     if args.all_dates and args.date is not None:
         raise ValueError("--all-dates와 --date는 동시에 사용할 수 없습니다.")
+    if not args.all_dates and args.date is None:
+        raise ValueError("--all-dates 또는 --date YYYY-MM-DD 중 하나를 지정해 주세요.")
 
-    if args.all_dates:
-        output = generate_all_dates_animation_site(
-            data_dir=args.data_dir,
-            layout_svg=args.layout_svg,
-            output_html=args.output_html,
-            max_lists=args.max_lists,
-            walking_speed_mps=args.walking_speed_mps,
-            pick_seconds_per_unit=args.pick_seconds_per_unit,
-            edge_capacity=args.edge_capacity,
-            pick_node_capacity=args.pick_node_capacity,
-        )
-        print(f"[DONE] Open this file in your browser: {output}")
-        return
-
-    target_date = None if args.date is None else date.fromisoformat(args.date)
-    output = generate_observed_picking_animation(
+    common = dict(
         data_dir=args.data_dir,
         layout_svg=args.layout_svg,
         output_html=args.output_html,
-        target_date=target_date,
         max_lists=args.max_lists,
+        entropy_lambda=args.entropy_lambda,
+        seed=args.seed,
         walking_speed_mps=args.walking_speed_mps,
         pick_seconds_per_unit=args.pick_seconds_per_unit,
         edge_capacity=args.edge_capacity,
         pick_node_capacity=args.pick_node_capacity,
     )
-    print(f"[DONE] Observed animation HTML saved to: {output}")
+    if args.all_dates:
+        generate_all_dates_single_html(**common)
+    else:
+        generate_single_date_html(target_date=date.fromisoformat(args.date), **common)
 
 
 if __name__ == "__main__":
