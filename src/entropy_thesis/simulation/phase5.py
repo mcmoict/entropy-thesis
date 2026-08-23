@@ -63,8 +63,10 @@ COMPARISON_METRICS: tuple[str, ...] = (
     "makespan_seconds",
     "congestion_wait_seconds",
     "congestion_conflicts",
+    "congestion_delay_ratio",
     "total_distance_m",
     "mean_release_delay_seconds",
+    "mean_spatial_entropy_multiworker",
     "mean_spatial_entropy_normalized",
 )
 
@@ -73,12 +75,16 @@ AGGREGATE_METRICS: tuple[str, ...] = (
     "makespan_seconds",
     "congestion_wait_seconds",
     "congestion_conflicts",
+    "congestion_delay_ratio",
     "total_distance_m",
     "mean_release_delay_seconds",
+    "mean_spatial_entropy_multiworker",
     "mean_spatial_entropy_normalized",
     "worker_allocation_entropy_normalized",
     "demand_worker_l1_gap",
 )
+
+PHASE5_MAXIMIZE_METRICS = set(MAXIMIZE_METRICS) | {"mean_spatial_entropy_multiworker"}
 
 HOLDOUT_COMPARISON_METRICS: tuple[str, ...] = (
     "total_distance_m",
@@ -948,7 +954,7 @@ def paired_comparison_records(daily: pd.DataFrame) -> list[dict[str, object]]:
             comparator_values = [float(other.loc[value, metric]) for value in common_dates]
             if not entropy_values:
                 continue
-            maximize = metric in MAXIMIZE_METRICS
+            maximize = metric in PHASE5_MAXIMIZE_METRICS
             wins = ties = losses = 0
             improvements: list[float] = []
             for entropy_value, comparator_value in zip(

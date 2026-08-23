@@ -91,6 +91,7 @@ mean_flow_time_seconds
 makespan_seconds
 congestion_wait_seconds
 congestion_conflicts
+congestion_delay_ratio
 total_distance_m
 mean_release_delay_seconds
 mean_spatial_entropy_multiworker
@@ -158,7 +159,7 @@ Entropy vs Equal
 Entropy vs Volume Proportional
 ```
 
-각 KPI에 대해 다음을 계산한다.
+각 KPI에 대해 다음을 계산한다. Phase 4 Pareto 혼잡축과 동일하게 `congestion_delay_ratio`도 paired 검정에 포함한다.
 
 ```text
 - 방법별 평균 / 표준편차 / 중앙값 / 최소 / 최대
@@ -228,7 +229,7 @@ entropy_based_workers
 ```
 
 이 파일은 Phase 6에서 Volume과 Entropy의 정수 배치가 달라진 날짜를 골라 Zone별 수요분포 →
-인력배치 → KPI 변화를 추적할 때 바로 사용할 수 있다.
+인력배치 → KPI 변화를 추적할 때 바로 사용할 수 있다. Phase 6 구현과 해석 규칙은 `README_PHASE6.md`를 참고한다.
 
 ### phase5_paired_comparison.csv
 

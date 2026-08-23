@@ -96,6 +96,16 @@ def test_aggregate_method_records_outputs_long_format_statistics() -> None:
     )
     assert item["n_days"] == 3
     assert item["mean"] == pytest.approx(80.0)
+    assert any(
+        record["method"] == "entropy_based"
+        and record["metric"] == "congestion_delay_ratio"
+        for record in records
+    )
+    assert any(
+        record["method"] == "entropy_based"
+        and record["metric"] == "mean_spatial_entropy_multiworker"
+        for record in records
+    )
 
 
 def test_holdout_comparison_records_outputs_phase3_style_means() -> None:
@@ -144,6 +154,18 @@ def test_paired_comparison_counts_entropy_wins_for_minimize_metric() -> None:
     assert item["ties"] == 0
     assert item["losses"] == 0
     assert item["mean_improvement_pct"] == pytest.approx(20.0)
+    assert any(
+        record["comparator"] == "baseline"
+        and record["metric"] == "congestion_delay_ratio"
+        for record in records
+    )
+    multiworker = next(
+        record
+        for record in records
+        if record["comparator"] == "baseline"
+        and record["metric"] == "mean_spatial_entropy_multiworker"
+    )
+    assert multiworker["direction"] == "maximize"
 
 
 def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:

@@ -1,6 +1,7 @@
 {
   "phase": 5,
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
+  "physical_model_revision": "2026-08-22-cc08-inch-micro20-macro4",
   "purpose": "out-of-sample holdout validation of Baseline/Random/Equal/Volume/Entropy(lambda*)",
   "calibration_dates": [
     "2023-01-05",
@@ -224,11 +225,12 @@
   ],
   "holdout_dates_skipped": [],
   "entropy": {
-    "weight": 0.1,
+    "weight": 0.25,
     "source": "phase4_recommendation:results\\phase4\\phase4_recommendation.json",
+    "selection_rule": "pareto_knee",
     "selection_metric": "mean_flow_time_seconds",
     "fixed_across_holdout_dates": true,
-    "interpretation": "lambda is selected only from Phase 4 calibration dates and held fixed across the untouched Phase 4 holdout dates; zone worker counts are recalculated from each holdout date's macro workload and within-macro micro-zone concentration using A_z = V_z * (1 + lambda * C_z)"
+    "interpretation": "lambda is selected only from Phase 4 calibration dates and held fixed across the untouched Phase 4 holdout dates; zone worker counts are recalculated from each holdout date's macro workload and within-macro micro-zone concentration by minimizing the integer objective J(n;lambda)=D(n)+lambda*R(n), where D=0.5*sum|n_z/N-V_z/sum(V)| and R=sum C_z*choose(n_z,2)."
   },
   "input": {
     "storage_locations": 2292,

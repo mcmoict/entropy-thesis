@@ -1,0 +1,5 @@
+proxy,target,n_changed_dates,pearson_r,pearson_p_value,spearman_rho,spearman_p_value,interpretation
+R_congestion_risk_reduction,congestion_conflicts_reduction,8,0.731227109721111,0.03928098852706637,0.4523809523809524,0.2604047674368853,exploratory changed-allocation subset only
+R_congestion_risk_reduction,congestion_wait_seconds_reduction,8,0.8672169580314393,0.005285465166498672,0.4285714285714286,0.2894032248467901,exploratory changed-allocation subset only
+R_congestion_risk_reduction,congestion_delay_ratio_reduction,8,0.8997737588419019,0.002331596541504655,0.5000000000000001,0.2070312499999999,exploratory changed-allocation subset only
+D_demand_mismatch_increase,mean_flow_time_increase,8,0.43724415715197573,0.2786658709981981,0.2380952380952381,0.5701563208157683,exploratory changed-allocation subset only

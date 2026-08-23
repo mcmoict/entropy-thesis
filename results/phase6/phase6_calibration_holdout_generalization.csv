@@ -1,0 +1,3 @@
+split,entropy_weight,n_dates,flow_time_cost_pct,conflicts_reduction_pct,wait_reduction_pct,congestion_ratio_reduction_pct,composite_congestion_reduction_pct,reference_method
+calibration,0.25,92,4.8184777885105925,11.400385699451121,22.658823023950273,14.566140989732473,16.208449904377943,lambda=0 (exact Volume control)
+holdout,0.25,40,2.8360497271957774,4.5023315645602136,11.313703427866727,5.854483508410279,7.223506166945737,volume_proportional

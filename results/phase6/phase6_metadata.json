@@ -1,0 +1,37 @@
+{
+  "phase": 6,
+  "revision": "phase6-holdout-tradeoff-mechanism-v1",
+  "purpose": "post-hoc robustness and mechanism analysis of the frozen Phase 5 holdout; no lambda reselection and no holdout resampling",
+  "source": {
+    "phase4_dir": "results\\phase4",
+    "phase5_dir": "results\\phase5",
+    "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
+    "entropy_weight": 0.25,
+    "selection_rule": "pareto_knee"
+  },
+  "holdout": {
+    "n_dates": 40,
+    "same_as_volume_dates": 32,
+    "changed_vs_volume_dates": 8
+  },
+  "statistics": {
+    "paired_test": "Wilcoxon signed-rank, two-sided",
+    "multiple_testing": "Holm correction across the four Phase-4 Pareto metrics",
+    "bootstrap": "paired nonparametric bootstrap of oriented mean difference",
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 42,
+    "confidence_level": 0.95
+  },
+  "mechanism_diagnostics": {
+    "objective_preference_verified_dates": 8,
+    "shifted_toward_lower_concentration_dates": 8,
+    "actual_composite_congestion_improved_dates": 6,
+    "proxy_correlations": "exploratory only because n is the allocation-changed subset"
+  },
+  "interpretation_rules": {
+    "positive_improvement_pct": "Entropy is better than Volume for the metric",
+    "flow_time_cost_pct": "positive means Entropy is slower than Volume/lambda=0",
+    "congestion_reduction_pct": "positive means Entropy reduces congestion",
+    "changed_date_subset": "descriptive mechanism analysis only; it is selected by allocation difference and is not used to retune lambda or replace the full-holdout inferential result"
+  }
+}

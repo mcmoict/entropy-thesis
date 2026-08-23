@@ -3,7 +3,7 @@
 Shannon entropy로 물류센터 피킹 작업자의 공간적 집중과 혼잡을 측정하고,
 네 가지 작업자 배치 방식을 이산 사건 시뮬레이션으로 비교하는 석사 논문 연구 프로젝트입니다.
 
-## 실제 데이터 연구 모델 (Phase 1~5)
+## 실제 데이터 연구 모델 (Phase 1~6)
 
 - 원본 CAD 좌표 단위: **inch**, `1 inch = 0.0254 m`
 - 모든 picker의 단일 출발/종료 depot: **CC-08**
@@ -150,7 +150,7 @@ entropy-thesis --config configs/overload.yaml
 엔트로피 민감도 분석은 같은 시나리오에서 `entropy_weight`만 바꿔 별도 출력 디렉터리로
 실행합니다. 설정과 seed가 같으면 결과가 동일합니다.
 
-## 실제 데이터 Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5
+## 실제 데이터 Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6
 
 실제 CSV 기반 창고 graph 검증은 다음 명령으로 실행합니다.
 
@@ -176,7 +176,7 @@ Phase 4는 전체 적합 날짜를 Calibration / Holdout으로 분리한 뒤 Cal
 python -m entropy_thesis.simulation.phase4 --data-dir data/raw
 ```
 
-기본 λ 후보는 `0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8`입니다. 기본 분할은 날짜 단위 chronological 70% Calibration / 30% Holdout이며, 동일 날짜에서 같은 정수 작업자 배치를 만드는 λ는 DES를 한 번만 실행합니다. λ*는 Calibration 날짜별 `mean_flow_time_seconds` 평균을 기준으로 선택하고, λ=0 대비 paired Wilcoxon 통계도 함께 저장합니다.
+기본 λ 후보는 `0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8`입니다. 기본 분할은 날짜 단위 chronological 70% Calibration / 30% Holdout이며, 동일 날짜에서 같은 정수 작업자 배치를 만드는 λ는 DES를 한 번만 실행합니다. λ*는 `mean_flow_time_seconds`와 `Conflicts / Wait / Congestion Ratio`의 Calibration 평균으로 구성한 Pareto frontier에서 knee point를 선택하며, λ=0 대비 paired Wilcoxon 통계는 별도로 보고합니다.
 
 Phase 5의 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택한 λ*와 Holdout 날짜를 `results/phase4/phase4_recommendation.json`에서 그대로 읽어 Baseline / Random / Equal / Volume Proportional / Entropy-based를 paired 비교합니다. Phase 5에서는 λ 재보정이나 Holdout 재분할을 하지 않습니다.
 
@@ -184,7 +184,13 @@ Phase 5의 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택�
 python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 ```
 
-세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`, `README_PHASE5.md`를 참고합니다.
+Phase 6는 λ를 다시 선택하지 않고 Phase 5 Frozen Holdout에서 Calibration→Holdout Pareto trade-off, Entropy/Volume 배치 변경 날짜의 메커니즘, Holm 보정 Wilcoxon 및 paired bootstrap CI를 분석합니다.
+
+```bash
+python -m entropy_thesis.simulation.phase6
+```
+
+세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`, `README_PHASE5.md`, `README_PHASE6.md`를 참고합니다.
 
 ## 모델 범위와 한계
 
