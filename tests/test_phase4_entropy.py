@@ -296,3 +296,55 @@ def test_phase4_pareto_knee_balances_flow_time_and_congestion() -> None:
     assert by_lambda[0.25]["conflicts_reduction_vs_lambda0_pct"] == pytest.approx(30.0)
     assert by_lambda[0.25]["composite_congestion_reduction_vs_lambda0_pct"] == pytest.approx(30.0)
     assert select_phase4_pareto_knee_from_daily(daily) == pytest.approx(0.25)
+
+
+def test_selected_phase4_congestion_kpi_records_match_tradeoff_mean_reductions() -> None:
+    import pandas as pd
+
+    from entropy_thesis.simulation.phase4 import (
+        paired_phase4_lambda_records,
+        selected_phase4_congestion_kpi_records,
+    )
+
+    rows = []
+    for day, zero_values, candidate_values in [
+        ("2023-01-01", (100.0, 200.0, 0.10), (80.0, 150.0, 0.08)),
+        ("2023-01-02", (200.0, 400.0, 0.20), (160.0, 300.0, 0.16)),
+    ]:
+        for weight, values in [(0.0, zero_values), (0.25, candidate_values)]:
+            rows.append(
+                {
+                    "selected_date": day,
+                    "entropy_weight": weight,
+                    "congestion_conflicts": values[0],
+                    "congestion_wait_seconds": values[1],
+                    "congestion_delay_ratio": values[2],
+                }
+            )
+
+    paired = pd.DataFrame(
+        paired_phase4_lambda_records(
+            pd.DataFrame(rows),
+            metrics=(
+                "congestion_conflicts",
+                "congestion_wait_seconds",
+                "congestion_delay_ratio",
+            ),
+        )
+    )
+    records = selected_phase4_congestion_kpi_records(
+        paired,
+        selected_weight=0.25,
+    )
+    by_metric = {record["metric"]: record for record in records}
+
+    assert by_metric["congestion_conflicts"]["reference_mean"] == pytest.approx(150.0)
+    assert by_metric["congestion_conflicts"]["candidate_mean"] == pytest.approx(120.0)
+    assert by_metric["congestion_conflicts"]["improve_pct"] == pytest.approx(20.0)
+    assert by_metric["congestion_wait_seconds"]["improve_pct"] == pytest.approx(25.0)
+    assert by_metric["congestion_delay_ratio"]["reference_mean_display"] == pytest.approx(15.0)
+    assert by_metric["congestion_delay_ratio"]["candidate_mean_display"] == pytest.approx(12.0)
+    assert by_metric["congestion_delay_ratio"]["improve_pct"] == pytest.approx(20.0)
+    assert all(record["wins"] == 2 for record in records)
+    assert all(record["ties"] == 0 for record in records)
+    assert all(record["losses"] == 0 for record in records)

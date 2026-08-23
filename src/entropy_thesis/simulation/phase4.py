@@ -958,6 +958,17 @@ PHASE4_COMPARISON_METRICS: tuple[SelectionMetric, ...] = (
     "mean_spatial_entropy_normalized",
 )
 
+PHASE4_CONGESTION_SIGNIFICANCE_METRICS: tuple[SelectionMetric, ...] = (
+    "congestion_conflicts",
+    "congestion_wait_seconds",
+    "congestion_delay_ratio",
+)
+PHASE4_CONGESTION_METRIC_LABELS: dict[str, str] = {
+    "congestion_conflicts": "Conflicts",
+    "congestion_wait_seconds": "Wait(s)",
+    "congestion_delay_ratio": "Congestion(%)",
+}
+
 
 @dataclass(frozen=True)
 class Phase4DateProfile:
@@ -1424,6 +1435,64 @@ def paired_phase4_lambda_records(
     return records
 
 
+def selected_phase4_congestion_kpi_records(
+    paired: pd.DataFrame,
+    *,
+    selected_weight: float,
+) -> list[dict[str, object]]:
+    """Return thesis-facing congestion significance rows for the selected λ*.
+
+    Paired Wilcoxon/W-T-L values come directly from the date-level comparison
+    against λ=0.  ``improve_pct`` is intentionally calculated from the two
+    calibration-date means so it matches the reduction percentages shown in
+    the Efficiency-Congestion Trade-off table.  Congestion delay ratio is
+    exposed as percentage points only for display; the statistical test still
+    uses the original paired ratio values.
+    """
+
+    if paired.empty:
+        raise ValueError("Phase 4 paired result가 비어 있습니다.")
+
+    records: list[dict[str, object]] = []
+    for metric in PHASE4_CONGESTION_SIGNIFICANCE_METRICS:
+        rows = paired[
+            (paired["metric"] == str(metric))
+            & paired["entropy_weight"].astype(float).map(
+                lambda value: math.isclose(
+                    value, float(selected_weight), rel_tol=1e-12, abs_tol=1e-12
+                )
+            )
+        ]
+        if rows.empty:
+            raise ValueError(
+                f"선택된 λ={selected_weight:g}의 paired congestion KPI가 없습니다: {metric}"
+            )
+        row = rows.iloc[0]
+        reference_mean = float(row["reference_mean"])
+        candidate_mean = float(row["candidate_mean"])
+        improve_pct = -_percent_change(candidate_mean, reference_mean)
+        display_scale = 100.0 if metric == "congestion_delay_ratio" else 1.0
+        records.append(
+            {
+                "entropy_weight": float(selected_weight),
+                "metric": str(metric),
+                "metric_label": PHASE4_CONGESTION_METRIC_LABELS[str(metric)],
+                "n_dates": int(row["n_dates"]),
+                "reference_mean": reference_mean,
+                "candidate_mean": candidate_mean,
+                "reference_mean_display": reference_mean * display_scale,
+                "candidate_mean_display": candidate_mean * display_scale,
+                "improve_pct": float(improve_pct),
+                "wins": int(row["wins"]),
+                "ties": int(row["ties"]),
+                "losses": int(row["losses"]),
+                "wilcoxon_p_value": float(row["wilcoxon_p_value"]),
+                "significant_at_0_05": bool(float(row["wilcoxon_p_value"]) < 0.05),
+            }
+        )
+    return records
+
+
 def select_phase4_entropy_weight_from_daily(
     daily: pd.DataFrame,
     *,
@@ -1863,6 +1932,12 @@ def write_phase4_multidate_results(
         )
     )
     pareto = pd.DataFrame(phase4_pareto_records(daily))
+    selected_congestion = pd.DataFrame(
+        selected_phase4_congestion_kpi_records(
+            paired,
+            selected_weight=run.selected_entropy_weight,
+        )
+    )
     date_profiles = pd.DataFrame(_date_profile_records(run))
     allocations = pd.DataFrame(phase4_allocation_records(run))
 
@@ -1871,6 +1946,9 @@ def write_phase4_multidate_results(
     aggregate.to_csv(output_dir / "phase4_lambda_statistics.csv", index=False)
     paired.to_csv(output_dir / "phase4_pairwise_vs_lambda0.csv", index=False)
     pareto.to_csv(output_dir / "phase4_pareto_analysis.csv", index=False)
+    selected_congestion.to_csv(
+        output_dir / "phase4_selected_congestion_kpis_vs_lambda0.csv", index=False
+    )
     allocations.to_csv(output_dir / "phase4_allocations.csv", index=False)
 
     primary = aggregate[aggregate["metric"] == run.selection_metric].copy()
@@ -1944,6 +2022,7 @@ def write_phase4_multidate_results(
         "composite_congestion_reduction_vs_lambda0_pct": float(
             selected_pareto["composite_congestion_reduction_vs_lambda0_pct"]
         ),
+        "selected_congestion_kpis_vs_lambda0": selected_congestion.to_dict(orient="records"),
         "calibration_dates": [value.isoformat() for value in run.calibration_dates],
         "holdout_dates": [value.isoformat() for value in run.holdout_dates],
         "selection_rule_definition": (
@@ -1988,8 +2067,10 @@ def write_phase4_multidate_results(
             ),
             "phase4D": (
                 "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired "
-                "Wilcoxon signed-rank 검정을 수행한다. Flow Time, Conflicts, Wait, Congestion ratio의 "
-                "평균을 함께 사용해 4목적 Pareto 비지배 여부도 계산한다."
+                "two-sided Wilcoxon signed-rank 검정을 수행한다. 선택된 λ*에 대해서는 Conflicts, "
+                "Wait, Congestion의 Mean(λ=0), Mean(λ*), 평균 기준 개선율, W/T/L, p-value를 별도 "
+                "표와 CSV로 기록한다. Flow Time, Conflicts, Wait, Congestion ratio의 평균을 함께 "
+                "사용해 4목적 Pareto 비지배 여부도 계산한다."
             ),
             "phase4E": (
                 "기본 pareto_knee 규칙에서는 세 혼잡 KPI를 λ=0 기준으로 정규화한 동일가중 congestion "
@@ -2227,6 +2308,12 @@ def main() -> None:
     primary = statistics[statistics["metric"] == run.selection_metric].sort_values("entropy_weight")
     paired = pd.DataFrame(paired_phase4_lambda_records(daily))
     primary_paired = paired[paired["metric"] == run.selection_metric].sort_values("entropy_weight")
+    selected_congestion = pd.DataFrame(
+        selected_phase4_congestion_kpi_records(
+            paired,
+            selected_weight=run.selected_entropy_weight,
+        )
+    )
     pareto = pd.DataFrame(phase4_pareto_records(daily)).sort_values("entropy_weight")
     knee_weight = float(
         pareto.loc[pareto["selected_knee"].astype(bool), "entropy_weight"].iloc[0]
@@ -2290,6 +2377,24 @@ def main() -> None:
             f"{int(pair['wins'])}/{int(pair['ties'])}/{int(pair['losses'])}"
             f"           {float(pair['wilcoxon_p_value']):.6g}"
         )
+    print()
+    print("=== Phase 4D | Paired Congestion KPIs vs λ=0 ===")
+    print("Lambda   Metric          Mean(λ=0)   Mean(λ)   Improve%   W/T/L        p-value")
+    for _, row in selected_congestion.iterrows():
+        weight = float(row["entropy_weight"])
+        marker = "*" if math.isclose(weight, run.selected_entropy_weight) else " "
+        print(
+            f"{marker}{weight:<7g} "
+            f"{str(row['metric_label']):<15} "
+            f"{float(row['reference_mean_display']):>10,.2f} "
+            f"{float(row['candidate_mean_display']):>10,.2f} "
+            f"{float(row['improve_pct']):>9.2f}   "
+            f"{int(row['wins'])}/{int(row['ties'])}/{int(row['losses'])}"
+            f"      {float(row['wilcoxon_p_value']):.6g}"
+        )
+    print("  Improve%: + means the selected λ* reduced the KPI relative to λ=0.")
+    print("  W/T/L: calibration dates where λ* is better / tied / worse than λ=0.")
+    print("  p-value: two-sided paired Wilcoxon signed-rank test; p<0.05 is statistically significant.")
     print()
     print("=== Phase 4E | Selected Lambda ===")
     print(f"Selection rule        : {run.selection_rule}")
