@@ -96,6 +96,7 @@ HOLDOUT_COMPARISON_METRICS: tuple[str, ...] = (
 @dataclass(frozen=True)
 class Phase4HoldoutSpec:
     entropy_weight: float
+    selection_rule: str
     selection_metric: str
     calibration_dates: tuple[date, ...]
     holdout_dates: tuple[date, ...]
@@ -141,6 +142,7 @@ class Phase5Run:
     holdout_dates: tuple[date, ...]
     entropy_weight: float
     entropy_source: str
+    selection_rule: str
     selection_metric: str
     volume_basis: Literal["tasks", "units"]
     requested_dates: tuple[date, ...]
@@ -264,9 +266,9 @@ def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
     model_revision = str(payload.get("model_revision", ""))
     if model_revision != PHASE4_MODEL_REVISION:
         raise ValueError(
-            "Phase 4 recommendation이 현재 물리/Zone/정수 목적함수 모델과 호환되지 않습니다. "
+            "Phase 4 recommendation이 현재 물리/Zone/정수 목적함수/Pareto 선택 모델과 호환되지 않습니다. "
             f"expected={PHASE4_MODEL_REVISION!r}, found={model_revision or '<missing>'!r}. "
-            "최신 Phase 4 정수 목적함수로 Calibration을 다시 실행하세요."
+            "최신 Phase 4 Pareto-knee Calibration을 다시 실행하세요."
         )
 
     entropy_weight = float(payload["entropy_weight"])
@@ -276,6 +278,9 @@ def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
     selection_metric = str(payload.get("selection_metric", DEFAULT_SELECTION_METRIC))
     if selection_metric not in COMPARISON_METRICS:
         raise ValueError(f"지원하지 않는 Phase 4 selection_metric입니다: {selection_metric}")
+    selection_rule = str(payload.get("selection_rule", "pareto_knee"))
+    if selection_rule not in {"pareto_knee", "single_metric"}:
+        raise ValueError(f"지원하지 않는 Phase 4 selection_rule입니다: {selection_rule}")
 
     calibration_dates = _parse_iso_date_list(payload.get("calibration_dates"), field="calibration_dates")
     holdout_dates = _parse_iso_date_list(payload.get("holdout_dates"), field="holdout_dates")
@@ -288,6 +293,7 @@ def load_phase4_holdout_spec(path: str | Path) -> Phase4HoldoutSpec:
 
     return Phase4HoldoutSpec(
         entropy_weight=entropy_weight,
+        selection_rule=selection_rule,
         selection_metric=selection_metric,
         calibration_dates=calibration_dates,
         holdout_dates=holdout_dates,
@@ -596,6 +602,7 @@ def build_and_run_phase5(
         holdout_dates=spec.holdout_dates,
         entropy_weight=spec.entropy_weight,
         entropy_source=f"phase4_recommendation:{spec.source_path}",
+        selection_rule=spec.selection_rule,
         selection_metric=spec.selection_metric,
         volume_basis=volume_basis,
         requested_dates=tuple(requested),
@@ -1044,6 +1051,7 @@ def write_phase5_results(output_dir: str | Path, run: Phase5Run, *, parameters: 
         "entropy": {
             "weight": run.entropy_weight,
             "source": run.entropy_source,
+            "selection_rule": run.selection_rule,
             "selection_metric": run.selection_metric,
             "fixed_across_holdout_dates": True,
             "interpretation": (
@@ -1208,6 +1216,7 @@ def main() -> None:
     print(f"Skipped dates         : {len(run.skipped):,}")
     print(f"Fixed entropy lambda  : {run.entropy_weight:g}")
     print(f"Lambda source         : {run.entropy_source}")
+    print(f"Lambda selection rule : {run.selection_rule}")
     print(f"Primary metric        : {run.selection_metric}")
     print("Lambda recalibration  : no")
     print("Holdout resampling    : no")
@@ -1240,7 +1249,8 @@ def main() -> None:
     print("equal               : workers distributed as evenly as possible across active zones")
     print("volume_proportional : workers allocated in proportion to each date's zone workload")
     print(
-        f"entropy_based       : workload × (1 + lambda × micro-zone concentration), fixed lambda={run.entropy_weight:g}"
+        "entropy_based       : integer allocation minimizing D(n)+lambda*R(n), "
+        f"fixed lambda={run.entropy_weight:g} from Phase 4 Pareto-knee calibration"
     )
     print()
     print(f"=== Worker Allocation | Holdout Mean by Zone ({len(run.results):,} dates) ===")

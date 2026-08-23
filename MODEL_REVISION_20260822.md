@@ -59,7 +59,7 @@ J(n; lambda) = D(n) + lambda × R(n)
 - CC-08 / micro20-macro4이지만 **연속 가중치→반올림**을 사용한 Phase 4/5 결과: `results_legacy_pre_20260823_integer_objective/`로 이동
 - 새 `results/phase4`, `results/phase5`: 정수 목적함수 재실행용으로 비움
 
-Phase 5는 `phase4_recommendation.json`의 `model_revision`을 검사하여 `2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1`이 아닌 recommendation을 자동 거부한다.
+Phase 5는 `phase4_recommendation.json`의 `model_revision`을 검사하여 `2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1`이 아닌 recommendation을 자동 거부한다.
 
 ## 5. 실제 데이터 정적 검증 (DES 실행 전)
 

@@ -1,6 +1,6 @@
 {
   "phase": 4,
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
   "workflow": "4A_full_dates -> 4B_split -> 4C_calibration_DES -> 4D_statistics -> 4E_lambda_star",
   "input": {
     "storage_locations": 2292,
@@ -33,6 +33,7 @@
       4.0,
       8.0
     ],
+    "selection_rule": "pareto_knee",
     "selection_metric": "mean_flow_time_seconds",
     "seed": 42,
     "walking_speed_mps": 1.2,
@@ -180,20 +181,59 @@
   ],
   "selected": {
     "phase": "4E",
-    "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+    "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
     "allocation_objective": "J(n;lambda)=D(n)+lambda*R(n)",
+    "selection_rule": "pareto_knee",
     "selection_metric": "mean_flow_time_seconds",
     "direction": "minimize",
-    "entropy_weight": 0.0,
-    "metric_mean": 440.88618899625766,
-    "metric_median": 372.85892379920955,
+    "entropy_weight": 0.25,
+    "metric_mean": 462.1301920856531,
+    "metric_median": 414.87607894954664,
     "n_calibration_dates": 92,
     "reference_entropy_weight": 0.0,
-    "mean_improvement_vs_lambda0_pct": 0.0,
-    "wins_vs_lambda0": 0,
-    "ties_vs_lambda0": 92,
-    "losses_vs_lambda0": 0,
-    "wilcoxon_p_value_vs_lambda0": 1.0,
+    "mean_improvement_vs_lambda0_pct": -3.9962827984444935,
+    "wins_vs_lambda0": 3,
+    "ties_vs_lambda0": 65,
+    "losses_vs_lambda0": 24,
+    "wilcoxon_p_value_vs_lambda0": 0.0005912980805305901,
+    "pareto_efficiency_metric": "mean_flow_time_seconds",
+    "pareto_congestion_metrics": [
+      "congestion_conflicts",
+      "congestion_wait_seconds",
+      "congestion_delay_ratio"
+    ],
+    "pareto_frontier_entropy_weights": [
+      0.0,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      2.0,
+      4.0,
+      8.0
+    ],
+    "knee_frontier_entropy_weights": [
+      0.0,
+      0.05,
+      0.1,
+      0.25,
+      0.5,
+      0.75,
+      1.0,
+      2.0,
+      4.0,
+      8.0
+    ],
+    "pareto_knee_entropy_weight": 0.25,
+    "pareto_knee_score": 0.17685952271208039,
+    "selected_entropy_weight_knee_score": 0.17685952271208039,
+    "flow_time_change_vs_lambda0_pct": 4.8184777885105925,
+    "conflicts_reduction_vs_lambda0_pct": 11.400385699451121,
+    "wait_reduction_vs_lambda0_pct": 22.658823023950273,
+    "congestion_reduction_vs_lambda0_pct": 14.566140989732473,
+    "composite_congestion_reduction_vs_lambda0_pct": 16.208449904377943,
     "calibration_dates": [
       "2023-01-05",
       "2023-01-06",
@@ -330,19 +370,22 @@
       "2023-10-18",
       "2023-10-19"
     ],
-    "selection_rule": "Calibration 날짜를 동일 가중치로 두고 primary KPI의 날짜 평균이 최적인 λ를 선택한다. 정확한 동률이면 더 작은 λ를 선택한다. Wilcoxon 검정은 λ=0 대비 통계적 비교용이며 λ* 선택 자체의 유의성 필터로 사용하지 않는다."
+    "selection_rule_definition": "pareto_knee: Calibration 날짜를 동일 가중치로 두고 Flow Time / Conflicts / Wait / Congestion ratio의 4개 평균을 모두 최소화하는 비지배해를 찾는다. 세 혼잡 KPI는 각각 λ=0 평균으로 정규화한 뒤 동일 가중 평균하여 congestion index를 만들고, Flow Time-혼잡 index Pareto 곡선의 양 끝점을 잇는 chord에서 ideal 방향으로 가장 멀리 떨어진 knee point를 λ*로 선택한다. single_metric: 기존 단일 KPI 평균 최적화를 사용한다. Wilcoxon은 λ=0 대비 통계적 비교용이며 선택의 강제 필터가 아니다."
   },
   "definitions": {
     "phase4A": "timestamp가 있고 모든 picking location이 warehouse graph에서 resolve되며 최소 list/worker 조건을 만족하는 날짜를 적합 날짜로 정의한다.",
     "phase4B": "날짜 단위로 Calibration/Holdout을 분리하며 Holdout 날짜는 Phase 4C DES에 사용하지 않는다.",
     "phase4C": "각 날짜에서 20개 micro-zone 수요를 4개 macro-zone 내부 Shannon entropy로 요약하고 C_z=1-H_z를 계산한다. 가능한 정수 worker vector n을 직접 열거하여 D(n)=0.5*Σ|n_z/N-V_z/ΣV|, R(n)=Σ C_z*C(n_z,2), J(n;λ)=D(n)+λR(n)을 최소화하며, 동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다.",
-    "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
-    "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
+    "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다. Flow Time, Conflicts, Wait, Congestion ratio의 평균을 함께 사용해 4목적 Pareto 비지배 여부도 계산한다.",
+    "phase4E": "기본 pareto_knee 규칙에서는 세 혼잡 KPI를 λ=0 기준으로 정규화한 동일가중 congestion index와 Mean Flow Time의 2차원 trade-off 곡선에서 knee point를 λ*로 선택한다. --selection-rule single_metric을 지정하면 기존 단일 KPI 평균 최적화도 재현할 수 있다.",
     "lambda_zero": "λ=0은 Phase 3 Volume Proportional의 정수 배치를 정확히 control로 사용한다.",
     "entropy_concentration": "C_z=1-H_z. H_z는 macro-zone 내부 5개 micro-zone workload의 normalized Shannon entropy이다.",
     "D_demand_mismatch": "수요비중과 정수 작업자비중의 total-variation distance. 작을수록 Volume 배치에 가깝다.",
     "R_congestion_risk": "같은 macro-zone에 배치된 작업자 쌍 C(n_z,2)을 해당 zone의 수요 집중도 C_z로 가중한 정수 혼잡위험 지수.",
     "J_integer_objective": "D + lambda*R. lambda가 커질수록 수요 적합도 손실을 감수하고 집중 zone의 동시 작업자 쌍을 줄일 수 있다.",
+    "pareto_objectives": "Calibration 평균 Mean Flow Time / Conflicts / Congestion Wait / Congestion Delay Ratio를 모두 최소화한다.",
+    "congestion_index": "Conflicts, Wait, Congestion Ratio 각각을 λ=0 평균으로 나눈 뒤 동일 가중 평균한다. λ=0에서 1.0이며 작을수록 종합 혼잡이 낮다.",
+    "knee_point": "Pareto frontier에서 best-flow와 best-congestion endpoint를 연결한 chord로부터 ideal 방향의 정규화 수직거리가 최대인 점.",
     "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다."
   }
 }

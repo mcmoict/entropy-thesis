@@ -71,7 +71,7 @@ Allocation   Distance(m)  Conflicts  Wait(s)   Cong(%)  Release(s)  Flow(s)   Ma
 [3,2,2,1]      8,053.12       241    329.007     4.673     421.044   574.314    15,801.710      0.987687
 ```
 
-작업자 1명을 `Z04 -> Z03`으로 이동하면 conflicts와 congestion wait는 크게 감소하고 spatial entropy는 소폭 증가하지만, release delay / mean flow time / makespan은 증가한다. 따라서 **혼잡 완화와 처리시간 사이의 trade-off가 실제 DES KPI에서 나타난다.** 이 하루만 Mean Flow Time을 primary KPI로 선택하면 λ=0이 선택된다. 전체 λ*는 반드시 Calibration 92일을 다시 실행해 결정한다.
+작업자 1명을 `Z04 -> Z03`으로 이동하면 conflicts와 congestion wait는 크게 감소하고 spatial entropy는 소폭 증가하지만, release delay / mean flow time / makespan은 증가한다. 따라서 **혼잡 완화와 처리시간 사이의 trade-off가 실제 DES KPI에서 나타난다.** 이 하루만 Mean Flow Time을 primary KPI로 선택하면 λ=0이 선택된다. 이후 `PHASE4_PARETO_KNEE_20260823.md`에서 이 문제를 반영하여 전체 Calibration 92일의 Flow Time / Conflict / Wait / Congestion을 함께 평가하는 Pareto-knee λ 선택 규칙으로 확장하였다.
 
 ## 4. 실행 순서
 
@@ -109,7 +109,7 @@ python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 새 Phase 4 model revision은 다음과 같다.
 
 ```text
-2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1
+2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1
 ```
 
 Phase 5는 위 revision이 아닌 과거 Phase 4 recommendation을 거부한다. 과거 연속 가중치 방식의 Phase 4/5 결과는 `results_legacy_pre_20260823_integer_objective/`에 보존한다.

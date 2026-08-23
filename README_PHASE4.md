@@ -170,6 +170,7 @@ mean_flow_time_seconds
 makespan_seconds
 congestion_wait_seconds
 congestion_conflicts
+congestion_delay_ratio
 total_distance_m
 mean_release_delay_seconds
 mean_spatial_entropy_normalized
@@ -197,24 +198,69 @@ results/phase4/phase4_pairwise_vs_lambda0.csv
 
 Wilcoxon 검정은 Calibration 날짜별 paired KPI 차이를 검정하는 용도이다. 동일 정수 배치로 모든 날짜 차이가 0이면 p-value는 1.0으로 기록한다.
 
-## 5. Phase 4E - 최적 λ* 결정
-
-기본 primary KPI는 기존 연구 방향과 동일하게 Mean Flow Time이다.
+추가로 이번 개정에서는 다음 네 KPI의 **92일 평균을 한 행에 함께 놓고** λ별 trade-off를 직접 비교한다.
 
 ```text
+Mean Flow Time
+Congestion Conflicts
+Congestion Wait
+Congestion Delay Ratio
+```
+
+각 λ가 네 KPI 모두에서 다른 λ에 지배되지 않으면 Pareto frontier로 표시한다. 결과는 다음 파일에 저장된다.
+
+```text
+results/phase4/phase4_pareto_analysis.csv
+```
+
+이 파일에는 λ=0 대비 Flow Time 증가율과 Conflict / Wait / Congestion 감소율, Pareto 여부, knee score가 함께 저장된다.
+
+## 5. Phase 4E - 최적 λ* 결정
+
+기본 선택 규칙은 더 이상 Mean Flow Time 하나만 최소화하지 않는다. 연구 질문을 다음과 같이 반영한다.
+
+```text
+작업처리 효율성을 과도하게 희생하지 않으면서
+작업자 공간 집중과 혼잡을 얼마나 줄일 수 있는가?
+```
+
+기본값은 다음과 같다.
+
+```text
+--selection-rule pareto_knee
 --selection-metric mean_flow_time_seconds
 ```
 
-최종 λ*는 **Calibration 날짜별 primary KPI의 산술평균**을 기준으로 결정한다.
+Pareto 판정은 다음 네 개의 Calibration 날짜 평균을 모두 최소화하는 4목적 문제로 수행한다.
 
 ```text
-시간/비용 KPI -> 평균 최소 λ
-Spatial Entropy -> 평균 최대 λ
+Flow(λ)      = mean(mean_flow_time_seconds)
+Conflict(λ)  = mean(congestion_conflicts)
+Wait(λ)      = mean(congestion_wait_seconds)
+Cong(λ)      = mean(congestion_delay_ratio)
 ```
 
-정확한 동률이면 더 작은 λ를 선택한다.
+그 다음 knee 계산을 위해 세 혼잡 KPI를 각각 λ=0 평균으로 정규화한다.
 
-중요하게도 Wilcoxon p-value를 λ* 선택의 강제 필터로 사용하지 않는다. λ*는 운영 KPI 평균으로 선택하고, 통계적 유의성은 별도로 보고한다. 따라서 결과가 유의하지 않다면 논문에서는 그 사실을 그대로 해석할 수 있다.
+```text
+I_cong(λ) = 1/3 × [
+    Conflict(λ) / Conflict(0)
+  + Wait(λ)     / Wait(0)
+  + Cong(λ)     / Cong(0)
+]
+```
+
+따라서 `I_cong(0)=1`이고, 값이 작을수록 λ=0보다 혼잡이 낮다. Pareto frontier의 `Flow(λ)`와 `I_cong(λ)`를 각각 0~1로 min-max 정규화한 뒤, **best-flow endpoint와 best-congestion endpoint를 잇는 직선(chord)에서 ideal point 방향으로 가장 멀리 떨어진 점**을 knee point로 정의한다. 그 λ를 최종 λ*로 선택한다.
+
+즉 λ*는 “가장 빠른 λ”가 아니라 **Flow Time 손실 대비 혼잡 감소의 한계효용이 꺾이는 지점**이다.
+
+기존 단일 KPI 방식도 재현할 수 있다.
+
+```powershell
+python -m entropy_thesis.simulation.phase4 --data-dir data/raw --selection-rule single_metric --selection-metric mean_flow_time_seconds
+```
+
+Wilcoxon p-value는 λ* 선택의 강제 필터로 사용하지 않는다. λ*는 Pareto-knee 운영 trade-off로 선택하고, 통계적 유의성은 별도로 보고한다.
 
 최종 결과:
 
@@ -226,6 +272,7 @@ results/phase4/phase4_recommendation.json
 
 ```text
 selection_metric
+selection_rule              # pareto_knee / single_metric
 entropy_weight              # λ*
 metric_mean
 metric_median
@@ -235,6 +282,13 @@ wins_vs_lambda0
 ties_vs_lambda0
 losses_vs_lambda0
 wilcoxon_p_value_vs_lambda0
+pareto_frontier_entropy_weights
+pareto_knee_entropy_weight
+pareto_knee_score
+flow_time_change_vs_lambda0_pct
+conflicts_reduction_vs_lambda0_pct
+wait_reduction_vs_lambda0_pct
+congestion_reduction_vs_lambda0_pct
 calibration_dates
 holdout_dates
 ```
@@ -255,7 +309,9 @@ Calibration/Holdout    : 70% / 30%
 Split                   : chronological
 Zones                   : 4
 λ                       : 0,0.05,0.1,0.25,0.5,0.75,1,2,4,8
-Primary KPI             : mean_flow_time_seconds
+Selection rule          : pareto_knee
+Efficiency KPI          : mean_flow_time_seconds
+Congestion KPIs         : conflicts / wait / congestion ratio
 ```
 
 λ 후보를 직접 지정하려면:
@@ -284,6 +340,7 @@ phase4_daily_results.csv          # Phase 4C 날짜 × λ DES KPI
 phase4_allocations.csv            # 날짜 × λ × zone 배치
 phase4_lambda_statistics.csv      # Phase 4D λ별 날짜 통계
 phase4_pairwise_vs_lambda0.csv    # Phase 4D λ=0 대비 paired 통계
+phase4_pareto_analysis.csv        # Phase 4D/E Flow-혼잡 Pareto 및 knee 분석
 phase4_recommendation.json        # Phase 4E λ*
 phase4_metadata.json              # 전체 실행 조건/정의/Calibration/Holdout 목록
 ```

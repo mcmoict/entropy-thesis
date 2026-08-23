@@ -151,7 +151,8 @@ def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:
     path.write_text(
         """{
   "phase": "4E",
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
+  "selection_rule": "pareto_knee",
   "selection_metric": "mean_flow_time_seconds",
   "entropy_weight": 0.05,
   "calibration_dates": ["2023-01-05", "2023-01-06"],
@@ -161,9 +162,10 @@ def test_load_phase4_holdout_spec_reads_frozen_split(tmp_path) -> None:
         encoding="utf-8",
     )
     assert THESIS_MODEL_REVISION == "2026-08-22-cc08-inch-micro20-macro4"
-    assert PHASE4_MODEL_REVISION == "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1"
+    assert PHASE4_MODEL_REVISION == "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1"
     spec = load_phase4_holdout_spec(path)
     assert spec.entropy_weight == pytest.approx(0.05)
+    assert spec.selection_rule == "pareto_knee"
     assert spec.calibration_dates == (date(2023, 1, 5), date(2023, 1, 6))
     assert spec.holdout_dates == (date(2023, 7, 19), date(2023, 7, 24))
 
@@ -192,7 +194,7 @@ def test_load_phase4_holdout_spec_rejects_overlap(tmp_path) -> None:
     path.write_text(
         """{
   "phase": "4E",
-  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1",
+  "model_revision": "2026-08-22-cc08-inch-micro20-macro4-integer-objective-v1-pareto-knee-v1",
   "selection_metric": "mean_flow_time_seconds",
   "entropy_weight": 0.05,
   "calibration_dates": ["2023-01-05"],

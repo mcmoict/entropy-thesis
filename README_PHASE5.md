@@ -22,12 +22,13 @@ results/phase4/phase4_recommendation.json
 
 ```text
 - selected λ*
-- primary selection metric
+- λ selection rule (`pareto_knee`)
+- efficiency/primary metric (`mean_flow_time_seconds`)
 - Calibration dates
 - frozen Holdout dates
 ```
 
-Phase 5는 **새 정수 목적함수 모델 revision**으로 생성된 Phase 4 recommendation만 허용한다. 이전 연속 가중치 방식에서 계산된 λ*와 Holdout 결과는 재사용하지 않는다.
+Phase 5는 **새 정수 목적함수 + Pareto-knee 선택 revision**으로 생성된 Phase 4 recommendation만 허용한다. 이전 단일 Flow Time 선택 또는 연속 가중치 방식에서 계산된 λ*와 Holdout 결과는 재사용하지 않는다.
 
 Phase 5는 recommendation 파일이 없거나, 최신 `phase=4E` 형식이 아니거나, model revision이 다르거나, Calibration/Holdout 날짜가 겹치면 실행을 중단한다.
 
@@ -78,7 +79,7 @@ Holdout이 아닌 날짜를 지정하면 실행하지 않는다.
 
 ## 5. 주요 KPI
 
-Primary KPI는 Phase 4에서 λ* 선택에 사용한 값과 동일하다.
+Phase 4의 λ* 자체는 Flow Time 하나가 아니라 Flow Time / Conflict / Wait / Congestion의 Pareto-knee로 선택한다. Phase 5에서 통계표의 primary efficiency KPI는 그중 처리효율 축인 다음 값을 유지한다.
 
 ```text
 mean_flow_time_seconds

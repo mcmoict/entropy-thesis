@@ -6,6 +6,8 @@ from entropy_thesis.simulation.phase3 import allocate_phase3_workers
 from entropy_thesis.simulation.phase4 import (
     allocate_phase4_workers,
     build_entropy_candidates,
+    phase4_pareto_records,
+    select_phase4_pareto_knee_from_daily,
 )
 
 
@@ -243,3 +245,54 @@ def test_phase4_paired_statistics_count_wins_against_lambda_zero() -> None:
     assert item["ties"] == 1
     assert item["losses"] == 0
     assert item["mean_improvement_pct"] == pytest.approx(10.0)
+
+
+def test_phase4_pareto_knee_balances_flow_time_and_congestion() -> None:
+    import pandas as pd
+
+    daily = pd.DataFrame(
+        [
+            {
+                "selected_date": "2023-01-01",
+                "entropy_weight": 0.0,
+                "mean_flow_time_seconds": 100.0,
+                "congestion_conflicts": 100.0,
+                "congestion_wait_seconds": 100.0,
+                "congestion_delay_ratio": 0.10,
+            },
+            {
+                "selected_date": "2023-01-01",
+                "entropy_weight": 0.25,
+                "mean_flow_time_seconds": 105.0,
+                "congestion_conflicts": 70.0,
+                "congestion_wait_seconds": 70.0,
+                "congestion_delay_ratio": 0.07,
+            },
+            {
+                "selected_date": "2023-01-01",
+                "entropy_weight": 0.5,
+                "mean_flow_time_seconds": 110.0,
+                "congestion_conflicts": 80.0,
+                "congestion_wait_seconds": 80.0,
+                "congestion_delay_ratio": 0.08,
+            },
+            {
+                "selected_date": "2023-01-01",
+                "entropy_weight": 1.0,
+                "mean_flow_time_seconds": 140.0,
+                "congestion_conflicts": 50.0,
+                "congestion_wait_seconds": 50.0,
+                "congestion_delay_ratio": 0.05,
+            },
+        ]
+    )
+
+    records = phase4_pareto_records(daily)
+    by_lambda = {record["entropy_weight"]: record for record in records}
+
+    assert by_lambda[0.5]["pareto_frontier"] is False
+    assert by_lambda[0.25]["pareto_frontier"] is True
+    assert by_lambda[0.25]["flow_time_change_vs_lambda0_pct"] == pytest.approx(5.0)
+    assert by_lambda[0.25]["conflicts_reduction_vs_lambda0_pct"] == pytest.approx(30.0)
+    assert by_lambda[0.25]["composite_congestion_reduction_vs_lambda0_pct"] == pytest.approx(30.0)
+    assert select_phase4_pareto_knee_from_daily(daily) == pytest.approx(0.25)

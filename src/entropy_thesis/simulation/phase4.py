@@ -39,15 +39,24 @@ SelectionMetric = Literal[
     "makespan_seconds",
     "congestion_wait_seconds",
     "congestion_conflicts",
+    "congestion_delay_ratio",
     "total_distance_m",
     "mean_release_delay_seconds",
     "mean_spatial_entropy_normalized",
 ]
+SelectionRule = Literal["pareto_knee", "single_metric"]
 
 DEFAULT_ENTROPY_WEIGHTS: tuple[float, ...] = (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0)
 DEFAULT_SELECTION_METRIC: SelectionMetric = "mean_flow_time_seconds"
+DEFAULT_SELECTION_RULE: SelectionRule = "pareto_knee"
 MAXIMIZE_METRICS = {"mean_spatial_entropy_normalized"}
-PHASE4_MODEL_REVISION = f"{THESIS_MODEL_REVISION}-integer-objective-v1"
+PARETO_EFFICIENCY_METRIC: SelectionMetric = "mean_flow_time_seconds"
+PARETO_CONGESTION_METRICS: tuple[SelectionMetric, ...] = (
+    "congestion_conflicts",
+    "congestion_wait_seconds",
+    "congestion_delay_ratio",
+)
+PHASE4_MODEL_REVISION = f"{THESIS_MODEL_REVISION}-integer-objective-v1-pareto-knee-v1"
 
 
 @dataclass(frozen=True)
@@ -421,6 +430,7 @@ def select_phase4_candidate(
         "makespan_seconds",
         "congestion_wait_seconds",
         "congestion_conflicts",
+        "congestion_delay_ratio",
         "total_distance_m",
         "mean_release_delay_seconds",
         "mean_spatial_entropy_normalized",
@@ -942,6 +952,7 @@ PHASE4_COMPARISON_METRICS: tuple[SelectionMetric, ...] = (
     "makespan_seconds",
     "congestion_wait_seconds",
     "congestion_conflicts",
+    "congestion_delay_ratio",
     "total_distance_m",
     "mean_release_delay_seconds",
     "mean_spatial_entropy_normalized",
@@ -987,6 +998,7 @@ class Phase4MultiDateRun:
     holdout_dates: tuple[date, ...]
     calibration_results: tuple[Phase4CalibrationDateResult, ...]
     entropy_weights: tuple[float, ...]
+    selection_rule: SelectionRule
     selection_metric: SelectionMetric
     selected_entropy_weight: float
     split_strategy: str
@@ -1431,6 +1443,261 @@ def select_phase4_entropy_weight_from_daily(
     return min(candidates)
 
 
+def _lambda0_relative_ratio(
+    value: float,
+    reference: float,
+    *,
+    fallback_scale: float,
+) -> float:
+    """Return a non-negative KPI ratio with λ=0 anchored at 1.0.
+
+    Congestion KPIs are normally positive, so ``value / reference`` is the
+    natural normalization.  The fallback only matters for degenerate runs in
+    which λ=0 has exactly zero congestion; it keeps the Pareto diagnostic
+    finite without inventing an epsilon-dependent percentage.
+    """
+
+    if abs(reference) > 1e-12:
+        return value / reference
+    if abs(value) <= 1e-12:
+        return 1.0
+    scale = fallback_scale if fallback_scale > 1e-12 else abs(value)
+    return 1.0 + value / scale
+
+
+def phase4_pareto_records(daily: pd.DataFrame) -> list[dict[str, object]]:
+    """Build the Phase-4 efficiency/congestion Pareto diagnostic.
+
+    The Pareto test itself uses the four *raw* calibration-date means and
+    minimizes all of them:
+
+    - mean flow time (processing efficiency),
+    - congestion conflicts,
+    - congestion wait seconds,
+    - congestion delay ratio.
+
+    For knee detection only, the three congestion KPIs are converted to a
+    transparent equal-weight index after normalizing each KPI by its λ=0 mean.
+    Thus ``congestion_index_lambda0 == 1`` at λ=0 and values below 1 represent
+    aggregate congestion reduction.  The knee is the Pareto point with the
+    largest perpendicular departure *toward the ideal point* from the chord
+    connecting the best-flow and best-congestion endpoints after min-max
+    normalization.  This avoids selecting λ from Flow Time alone while still
+    exposing every raw congestion KPI in the output.
+    """
+
+    if daily.empty:
+        raise ValueError("Phase 4 daily result가 비어 있습니다.")
+    required = (
+        "entropy_weight",
+        str(PARETO_EFFICIENCY_METRIC),
+        *(str(metric) for metric in PARETO_CONGESTION_METRICS),
+    )
+    missing = [column for column in required if column not in daily.columns]
+    if missing:
+        raise ValueError("Pareto 분석에 필요한 KPI가 없습니다: " + ", ".join(missing))
+
+    mean_columns = [
+        str(PARETO_EFFICIENCY_METRIC),
+        *(str(metric) for metric in PARETO_CONGESTION_METRICS),
+    ]
+    means = (
+        daily.groupby("entropy_weight", sort=True)[mean_columns]
+        .mean()
+        .reset_index()
+    )
+    zero_rows = means[
+        means["entropy_weight"].astype(float).map(
+            lambda value: math.isclose(value, 0.0, abs_tol=1e-12)
+        )
+    ]
+    if zero_rows.empty:
+        raise ValueError("Pareto 분석 기준을 위해 entropy_weight에 λ=0이 필요합니다.")
+    reference = zero_rows.iloc[0]
+
+    congestion_scales = {
+        str(metric): max(abs(float(value)) for value in means[str(metric)])
+        for metric in PARETO_CONGESTION_METRICS
+    }
+
+    rows: list[dict[str, object]] = []
+    for _, item in means.iterrows():
+        weight = float(item["entropy_weight"])
+        flow = float(item[str(PARETO_EFFICIENCY_METRIC)])
+        conflicts = float(item["congestion_conflicts"])
+        wait_seconds = float(item["congestion_wait_seconds"])
+        congestion_ratio = float(item["congestion_delay_ratio"])
+        relative_ratios = [
+            _lambda0_relative_ratio(
+                float(item[str(metric)]),
+                float(reference[str(metric)]),
+                fallback_scale=congestion_scales[str(metric)],
+            )
+            for metric in PARETO_CONGESTION_METRICS
+        ]
+        congestion_index = sum(relative_ratios) / len(relative_ratios)
+        rows.append(
+            {
+                "entropy_weight": weight,
+                "mean_flow_time_seconds": flow,
+                "flow_time_change_vs_lambda0_pct": _percent_change(
+                    flow, float(reference[str(PARETO_EFFICIENCY_METRIC)])
+                ),
+                "congestion_conflicts": conflicts,
+                "conflicts_reduction_vs_lambda0_pct": -_percent_change(
+                    conflicts, float(reference["congestion_conflicts"])
+                ),
+                "congestion_wait_seconds": wait_seconds,
+                "wait_reduction_vs_lambda0_pct": -_percent_change(
+                    wait_seconds, float(reference["congestion_wait_seconds"])
+                ),
+                "congestion_delay_ratio": congestion_ratio,
+                "congestion_percent": 100.0 * congestion_ratio,
+                "congestion_reduction_vs_lambda0_pct": -_percent_change(
+                    congestion_ratio, float(reference["congestion_delay_ratio"])
+                ),
+                "congestion_index_lambda0": congestion_index,
+                "composite_congestion_reduction_vs_lambda0_pct": 100.0
+                * (1.0 - congestion_index),
+            }
+        )
+
+    objective_columns = (
+        "mean_flow_time_seconds",
+        "congestion_conflicts",
+        "congestion_wait_seconds",
+        "congestion_delay_ratio",
+    )
+    tolerance = 1e-12
+    for index, row in enumerate(rows):
+        dominated = False
+        for other_index, other in enumerate(rows):
+            if index == other_index:
+                continue
+            no_worse = all(
+                float(other[column]) <= float(row[column]) + tolerance
+                for column in objective_columns
+            )
+            strictly_better = any(
+                float(other[column]) < float(row[column]) - tolerance
+                for column in objective_columns
+            )
+            if no_worse and strictly_better:
+                dominated = True
+                break
+        row["pareto_frontier"] = not dominated
+        row["flow_normalized"] = float("nan")
+        row["congestion_index_normalized"] = float("nan")
+        row["knee_frontier"] = False
+        row["knee_score"] = float("nan")
+        row["selected_knee"] = False
+
+    four_objective_frontier = [row for row in rows if bool(row["pareto_frontier"])]
+    if not four_objective_frontier:
+        raise ValueError("Pareto frontier를 계산할 수 없습니다.")
+
+    # Knee geometry is two-dimensional (Flow Time vs aggregate congestion).
+    # Remove points that are 4-D non-dominated only because one congestion KPI
+    # moves differently, but are dominated after the three congestion KPIs are
+    # summarized into the documented congestion index.
+    frontier: list[dict[str, object]] = []
+    for row in four_objective_frontier:
+        dominated_2d = False
+        for other in four_objective_frontier:
+            if row is other:
+                continue
+            no_worse = (
+                float(other["mean_flow_time_seconds"])
+                <= float(row["mean_flow_time_seconds"]) + tolerance
+                and float(other["congestion_index_lambda0"])
+                <= float(row["congestion_index_lambda0"]) + tolerance
+            )
+            strictly_better = (
+                float(other["mean_flow_time_seconds"])
+                < float(row["mean_flow_time_seconds"]) - tolerance
+                or float(other["congestion_index_lambda0"])
+                < float(row["congestion_index_lambda0"]) - tolerance
+            )
+            if no_worse and strictly_better:
+                dominated_2d = True
+                break
+        if not dominated_2d:
+            row["knee_frontier"] = True
+            frontier.append(row)
+
+    flow_values = [float(row["mean_flow_time_seconds"]) for row in frontier]
+    congestion_values = [float(row["congestion_index_lambda0"]) for row in frontier]
+    min_flow, max_flow = min(flow_values), max(flow_values)
+    min_congestion, max_congestion = min(congestion_values), max(congestion_values)
+    flow_span = max_flow - min_flow
+    congestion_span = max_congestion - min_congestion
+
+    for row in frontier:
+        row["flow_normalized"] = (
+            0.0
+            if flow_span <= tolerance
+            else (float(row["mean_flow_time_seconds"]) - min_flow) / flow_span
+        )
+        row["congestion_index_normalized"] = (
+            0.0
+            if congestion_span <= tolerance
+            else (float(row["congestion_index_lambda0"]) - min_congestion)
+            / congestion_span
+        )
+
+    best_flow = min(
+        frontier,
+        key=lambda row: (
+            float(row["mean_flow_time_seconds"]),
+            float(row["entropy_weight"]),
+        ),
+    )
+    best_congestion = min(
+        frontier,
+        key=lambda row: (
+            float(row["congestion_index_lambda0"]),
+            float(row["entropy_weight"]),
+        ),
+    )
+
+    ax = float(best_flow["flow_normalized"])
+    ay = float(best_flow["congestion_index_normalized"])
+    bx = float(best_congestion["flow_normalized"])
+    by = float(best_congestion["congestion_index_normalized"])
+    vx, vy = bx - ax, by - ay
+    chord_length = math.hypot(vx, vy)
+
+    if best_flow is best_congestion or chord_length <= tolerance:
+        selected = best_flow
+        selected["knee_score"] = 0.0
+    else:
+        ideal_cross = vx * (0.0 - ay) - vy * (0.0 - ax)
+        orientation = -1.0 if ideal_cross < 0.0 else 1.0
+        for row in frontier:
+            px = float(row["flow_normalized"])
+            py = float(row["congestion_index_normalized"])
+            cross = vx * (py - ay) - vy * (px - ax)
+            row["knee_score"] = max(0.0, orientation * cross / chord_length)
+        selected = min(
+            frontier,
+            key=lambda row: (
+                -float(row["knee_score"]),
+                float(row["entropy_weight"]),
+            ),
+        )
+
+    selected["selected_knee"] = True
+    return sorted(rows, key=lambda row: float(row["entropy_weight"]))
+
+
+def select_phase4_pareto_knee_from_daily(daily: pd.DataFrame) -> float:
+    """Return λ* selected by the efficiency/congestion Pareto knee rule."""
+
+    records = phase4_pareto_records(daily)
+    selected = next(record for record in records if bool(record["selected_knee"]))
+    return float(selected["entropy_weight"])
+
+
 def build_and_run_phase4_multidate(
     data_dir: str | Path,
     *,
@@ -1443,6 +1710,7 @@ def build_and_run_phase4_multidate(
     volume_basis: Literal["tasks", "units"] = "tasks",
     minimum_per_active_zone: int = 1,
     entropy_weights: Iterable[float] = DEFAULT_ENTROPY_WEIGHTS,
+    selection_rule: SelectionRule = DEFAULT_SELECTION_RULE,
     selection_metric: SelectionMetric = DEFAULT_SELECTION_METRIC,
     seed: int = 42,
     walking_speed_mps: float = 1.2,
@@ -1458,6 +1726,13 @@ def build_and_run_phase4_multidate(
     weights = _validate_entropy_weights(entropy_weights)
     if not any(math.isclose(value, 0.0) for value in weights):
         raise ValueError("다중 날짜 Phase 4 통계 비교를 위해 entropy_weights에 λ=0이 필요합니다.")
+    if selection_rule not in {"pareto_knee", "single_metric"}:
+        raise ValueError(f"지원하지 않는 selection_rule입니다: {selection_rule}")
+    if selection_rule == "pareto_knee" and selection_metric != PARETO_EFFICIENCY_METRIC:
+        raise ValueError(
+            "pareto_knee 선택에서는 효율성 축을 mean_flow_time_seconds로 고정합니다. "
+            "다른 단일 KPI를 사용하려면 --selection-rule single_metric을 사용하세요."
+        )
 
     if progress is not None:
         progress.report(0.02, "Phase 4A | Loading input data")
@@ -1533,13 +1808,19 @@ def build_and_run_phase4_multidate(
         holdout_dates=holdout_dates,
         calibration_results=tuple(calibration_results),
         entropy_weights=weights,
+        selection_rule=selection_rule,
         selection_metric=selection_metric,
         selected_entropy_weight=0.0,
         split_strategy=split_strategy,
         calibration_ratio=float(calibration_ratio),
     )
     daily = pd.DataFrame(phase4_daily_records(provisional))
-    selected_weight = select_phase4_entropy_weight_from_daily(daily, metric=selection_metric)
+    if selection_rule == "pareto_knee":
+        selected_weight = select_phase4_pareto_knee_from_daily(daily)
+    else:
+        selected_weight = select_phase4_entropy_weight_from_daily(
+            daily, metric=selection_metric
+        )
     return replace(provisional, selected_entropy_weight=selected_weight)
 
 
@@ -1581,6 +1862,7 @@ def write_phase4_multidate_results(
             metrics=PHASE4_COMPARISON_METRICS,
         )
     )
+    pareto = pd.DataFrame(phase4_pareto_records(daily))
     date_profiles = pd.DataFrame(_date_profile_records(run))
     allocations = pd.DataFrame(phase4_allocation_records(run))
 
@@ -1588,6 +1870,7 @@ def write_phase4_multidate_results(
     daily.to_csv(output_dir / "phase4_daily_results.csv", index=False)
     aggregate.to_csv(output_dir / "phase4_lambda_statistics.csv", index=False)
     paired.to_csv(output_dir / "phase4_pairwise_vs_lambda0.csv", index=False)
+    pareto.to_csv(output_dir / "phase4_pareto_analysis.csv", index=False)
     allocations.to_csv(output_dir / "phase4_allocations.csv", index=False)
 
     primary = aggregate[aggregate["metric"] == run.selection_metric].copy()
@@ -1602,10 +1885,29 @@ def write_phase4_multidate_results(
             lambda value: math.isclose(value, run.selected_entropy_weight)
         )
     ].iloc[0]
+    selected_pareto = pareto[
+        pareto["entropy_weight"].astype(float).map(
+            lambda value: math.isclose(value, run.selected_entropy_weight)
+        )
+    ].iloc[0]
+    pareto_weights = [
+        float(value)
+        for value in pareto.loc[pareto["pareto_frontier"].astype(bool), "entropy_weight"]
+    ]
+    knee_frontier_weights = [
+        float(value)
+        for value in pareto.loc[pareto["knee_frontier"].astype(bool), "entropy_weight"]
+    ]
+    pareto_knee_weight = float(
+        pareto.loc[pareto["selected_knee"].astype(bool), "entropy_weight"].iloc[0]
+    )
+    pareto_knee_row = pareto[pareto["selected_knee"].astype(bool)].iloc[0]
+    selected_knee_score = float(selected_pareto["knee_score"])
     recommendation = {
         "phase": "4E",
         "model_revision": PHASE4_MODEL_REVISION,
         "allocation_objective": "J(n;lambda)=D(n)+lambda*R(n)",
+        "selection_rule": run.selection_rule,
         "selection_metric": run.selection_metric,
         "direction": "maximize" if run.selection_metric in MAXIMIZE_METRICS else "minimize",
         "entropy_weight": run.selected_entropy_weight,
@@ -1618,12 +1920,39 @@ def write_phase4_multidate_results(
         "ties_vs_lambda0": int(selected_pair["ties"]),
         "losses_vs_lambda0": int(selected_pair["losses"]),
         "wilcoxon_p_value_vs_lambda0": float(selected_pair["wilcoxon_p_value"]),
+        "pareto_efficiency_metric": str(PARETO_EFFICIENCY_METRIC),
+        "pareto_congestion_metrics": [str(metric) for metric in PARETO_CONGESTION_METRICS],
+        "pareto_frontier_entropy_weights": pareto_weights,
+        "knee_frontier_entropy_weights": knee_frontier_weights,
+        "pareto_knee_entropy_weight": pareto_knee_weight,
+        "pareto_knee_score": float(pareto_knee_row["knee_score"]),
+        "selected_entropy_weight_knee_score": (
+            selected_knee_score if math.isfinite(selected_knee_score) else None
+        ),
+        "flow_time_change_vs_lambda0_pct": float(
+            selected_pareto["flow_time_change_vs_lambda0_pct"]
+        ),
+        "conflicts_reduction_vs_lambda0_pct": float(
+            selected_pareto["conflicts_reduction_vs_lambda0_pct"]
+        ),
+        "wait_reduction_vs_lambda0_pct": float(
+            selected_pareto["wait_reduction_vs_lambda0_pct"]
+        ),
+        "congestion_reduction_vs_lambda0_pct": float(
+            selected_pareto["congestion_reduction_vs_lambda0_pct"]
+        ),
+        "composite_congestion_reduction_vs_lambda0_pct": float(
+            selected_pareto["composite_congestion_reduction_vs_lambda0_pct"]
+        ),
         "calibration_dates": [value.isoformat() for value in run.calibration_dates],
         "holdout_dates": [value.isoformat() for value in run.holdout_dates],
-        "selection_rule": (
-            "Calibration 날짜를 동일 가중치로 두고 primary KPI의 날짜 평균이 최적인 λ를 선택한다. "
-            "정확한 동률이면 더 작은 λ를 선택한다. Wilcoxon 검정은 λ=0 대비 통계적 비교용이며 "
-            "λ* 선택 자체의 유의성 필터로 사용하지 않는다."
+        "selection_rule_definition": (
+            "pareto_knee: Calibration 날짜를 동일 가중치로 두고 Flow Time / Conflicts / Wait / "
+            "Congestion ratio의 4개 평균을 모두 최소화하는 비지배해를 찾는다. 세 혼잡 KPI는 "
+            "각각 λ=0 평균으로 정규화한 뒤 동일 가중 평균하여 congestion index를 만들고, "
+            "Flow Time-혼잡 index Pareto 곡선의 양 끝점을 잇는 chord에서 ideal 방향으로 가장 "
+            "멀리 떨어진 knee point를 λ*로 선택한다. single_metric: 기존 단일 KPI 평균 최적화를 "
+            "사용한다. Wilcoxon은 λ=0 대비 통계적 비교용이며 선택의 강제 필터가 아니다."
         ),
     }
     with (output_dir / "phase4_recommendation.json").open("w", encoding="utf-8") as file:
@@ -1657,13 +1986,24 @@ def write_phase4_multidate_results(
                 "J(n;λ)=D(n)+λR(n)을 최소화하며, "
                 "동일 정수 worker allocation을 만드는 λ는 DES 결과를 재사용한다."
             ),
-            "phase4D": "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired Wilcoxon signed-rank 검정을 수행한다.",
-            "phase4E": "primary KPI의 Calibration 날짜 평균을 최적화하는 λ를 λ*로 선택하며 동률이면 더 작은 λ를 선택한다.",
+            "phase4D": (
+                "각 날짜를 동일 가중치로 λ별 KPI 평균/표준편차/중앙값을 계산하고 λ=0과 paired "
+                "Wilcoxon signed-rank 검정을 수행한다. Flow Time, Conflicts, Wait, Congestion ratio의 "
+                "평균을 함께 사용해 4목적 Pareto 비지배 여부도 계산한다."
+            ),
+            "phase4E": (
+                "기본 pareto_knee 규칙에서는 세 혼잡 KPI를 λ=0 기준으로 정규화한 동일가중 congestion "
+                "index와 Mean Flow Time의 2차원 trade-off 곡선에서 knee point를 λ*로 선택한다. "
+                "--selection-rule single_metric을 지정하면 기존 단일 KPI 평균 최적화도 재현할 수 있다."
+            ),
             "lambda_zero": "λ=0은 Phase 3 Volume Proportional의 정수 배치를 정확히 control로 사용한다.",
             "entropy_concentration": "C_z=1-H_z. H_z는 macro-zone 내부 5개 micro-zone workload의 normalized Shannon entropy이다.",
             "D_demand_mismatch": "수요비중과 정수 작업자비중의 total-variation distance. 작을수록 Volume 배치에 가깝다.",
             "R_congestion_risk": "같은 macro-zone에 배치된 작업자 쌍 C(n_z,2)을 해당 zone의 수요 집중도 C_z로 가중한 정수 혼잡위험 지수.",
             "J_integer_objective": "D + lambda*R. lambda가 커질수록 수요 적합도 손실을 감수하고 집중 zone의 동시 작업자 쌍을 줄일 수 있다.",
+            "pareto_objectives": "Calibration 평균 Mean Flow Time / Conflicts / Congestion Wait / Congestion Delay Ratio를 모두 최소화한다.",
+            "congestion_index": "Conflicts, Wait, Congestion Ratio 각각을 λ=0 평균으로 나눈 뒤 동일 가중 평균한다. λ=0에서 1.0이며 작을수록 종합 혼잡이 낮다.",
+            "knee_point": "Pareto frontier에서 best-flow와 best-congestion endpoint를 연결한 chord로부터 ideal 방향의 정규화 수직거리가 최대인 점.",
             "holdout_lock": "Holdout 날짜 KPI는 Phase 4에서 계산하지 않으며 이후 Phase 5 검증에만 사용한다.",
         },
     }
@@ -1703,6 +2043,15 @@ def main() -> None:
         type=_parse_entropy_weights,
         default=DEFAULT_ENTROPY_WEIGHTS,
         help="comma-separated lambda values; default=0,0.05,0.1,0.25,0.5,0.75,1,2,4,8",
+    )
+    parser.add_argument(
+        "--selection-rule",
+        choices=("pareto_knee", "single_metric"),
+        default=DEFAULT_SELECTION_RULE,
+        help=(
+            "lambda selection rule. default=pareto_knee (Flow Time vs congestion trade-off); "
+            "single_metric reproduces the legacy one-KPI mean rule"
+        ),
     )
     parser.add_argument(
         "--selection-metric",
@@ -1837,6 +2186,7 @@ def main() -> None:
         volume_basis=args.volume_basis,
         minimum_per_active_zone=args.minimum_per_active_zone,
         entropy_weights=args.entropy_weights,
+        selection_rule=args.selection_rule,
         selection_metric=args.selection_metric,
         seed=args.seed,
         walking_speed_mps=args.speed,
@@ -1858,6 +2208,7 @@ def main() -> None:
         "volume_basis": args.volume_basis,
         "minimum_per_active_zone": args.minimum_per_active_zone,
         "entropy_weights": list(args.entropy_weights),
+        "selection_rule": args.selection_rule,
         "selection_metric": args.selection_metric,
         "seed": args.seed,
         "walking_speed_mps": args.speed,
@@ -1876,6 +2227,10 @@ def main() -> None:
     primary = statistics[statistics["metric"] == run.selection_metric].sort_values("entropy_weight")
     paired = pd.DataFrame(paired_phase4_lambda_records(daily))
     primary_paired = paired[paired["metric"] == run.selection_metric].sort_values("entropy_weight")
+    pareto = pd.DataFrame(phase4_pareto_records(daily)).sort_values("entropy_weight")
+    knee_weight = float(
+        pareto.loc[pareto["selected_knee"].astype(bool), "entropy_weight"].iloc[0]
+    )
 
     print()
     print("=== Phase 4A | Eligible Operating Dates ===")
@@ -1890,7 +2245,39 @@ def main() -> None:
     print()
     print("=== Phase 4C/4D | Lambda Calibration ===")
     print(f"Lambda candidates     : {', '.join(f'{v:g}' for v in run.entropy_weights)}")
-    print(f"Selection metric      : {run.selection_metric}")
+    print(f"Selection rule        : {run.selection_rule}")
+    print(f"Efficiency metric     : {run.selection_metric}")
+    print()
+    print(
+        f"=== Phase 4D | Efficiency-Congestion Trade-off "
+        f"({len(run.calibration_dates):,} calibration dates) ==="
+    )
+    print(
+        "Lambda   Flow(s)  FlowΔ%   Conflicts  Conf↓%    Wait(s)  Wait↓%  "
+        "Cong(%)  Cong↓%   PF  KneeScore"
+    )
+    for _, row in pareto.iterrows():
+        weight = float(row["entropy_weight"])
+        marker = "*" if math.isclose(weight, run.selected_entropy_weight) else " "
+        pf = "Y" if bool(row["pareto_frontier"]) else "N"
+        knee_score = float(row["knee_score"])
+        knee_text = f"{knee_score:.4f}" if math.isfinite(knee_score) else "-"
+        print(
+            f"{marker}{weight:<7g} "
+            f"{float(row['mean_flow_time_seconds']):>8,.2f} "
+            f"{float(row['flow_time_change_vs_lambda0_pct']):>7.2f} "
+            f"{float(row['congestion_conflicts']):>10,.2f} "
+            f"{float(row['conflicts_reduction_vs_lambda0_pct']):>7.2f} "
+            f"{float(row['congestion_wait_seconds']):>10,.2f} "
+            f"{float(row['wait_reduction_vs_lambda0_pct']):>7.2f} "
+            f"{float(row['congestion_percent']):>8.2f} "
+            f"{float(row['congestion_reduction_vs_lambda0_pct']):>7.2f}   "
+            f"{pf:>1}   {knee_text:>9}"
+        )
+    print("  FlowΔ%: + means slower than λ=0; Conf↓/Wait↓/Cong↓: + means congestion reduction.")
+    print("  PF=Y: non-dominated in Flow Time / Conflicts / Wait / Congestion ratio.")
+    print()
+    print(f"=== Phase 4D | Paired {run.selection_metric} vs λ=0 ===")
     print("Lambda   Mean              Std               W/T/L vs λ=0    p-value")
     for _, stat in primary.iterrows():
         weight = float(stat["entropy_weight"])
@@ -1905,6 +2292,8 @@ def main() -> None:
         )
     print()
     print("=== Phase 4E | Selected Lambda ===")
+    print(f"Selection rule        : {run.selection_rule}")
+    print(f"Pareto knee λ         : {knee_weight:g}")
     print(f"Selected λ*           : {run.selected_entropy_weight:g}")
     print(f"Holdout untouched     : yes ({len(run.holdout_dates):,} dates)")
     print(f"Results               : {args.output_dir}")
