@@ -1140,7 +1140,7 @@ def render_single_html(
       </div>
       <div class="play-options">
         <label class="play-option-label" for="autoNextDateChk">
-          <input id="autoNextDateChk" type="checkbox" checked />
+          <input id="autoNextDateChk" type="checkbox" />
           <span>다음 날짜 자동실행</span>
         </label>
       </div>
@@ -1219,6 +1219,7 @@ def render_single_html(
   let scenario = null;
   let currentTime = 0;
   let playing = false;
+  let hasStarted = false;
   let raf = null;
   let lastTs = null;
   let selectedWorker = 'ALL';
@@ -1288,9 +1289,11 @@ def render_single_html(
     if (!scenario) return;
     if (currentTime >= scenario.meta.simulation_end_seconds) currentTime = 0;
     if (playing) return;
+    hasStarted = true;
     playing = true;
     playBtn.textContent = '⏸ 일시정지';
     lastTs = null;
+    render();
     raf = requestAnimationFrame(tick);
   }}
 
@@ -1389,9 +1392,14 @@ def render_single_html(
     }});
 
     const conflictEvents = Array.isArray(scenario.conflict_events) ? scenario.conflict_events : [];
-    const activeConflictEvents = conflictEvents.filter(event =>
-      currentTime >= Number(event.t0) && currentTime <= Number(event.t1)
-    );
+    // 시나리오를 막 불러온 재생 대기 상태에서는 t=0의 DES 이벤트를
+    // 아직 발생한 것으로 표시하지 않는다. 사용자가 재생하거나 슬라이더를
+    // 직접 움직인 뒤부터 실제 시간축의 충돌 이벤트를 표시한다.
+    const activeConflictEvents = hasStarted
+      ? conflictEvents.filter(event =>
+          currentTime >= Number(event.t0) && currentTime <= Number(event.t1)
+        )
+      : [];
     const collisionWorkers = new Set();
     activeConflictEvents.forEach(event => {{
       (event.worker_ids || []).forEach(workerId => collisionWorkers.add(String(workerId)));
@@ -1399,9 +1407,9 @@ def render_single_html(
 
     // 누적 충돌 이벤트: 재생 시작(0초)부터 현재 시각까지
     // 실제 DES conflict event의 시작시각(t0)이 지난 이벤트 수.
-    const cumulativeConflictEvents = conflictEvents.filter(event =>
-      Number(event.t0) <= currentTime
-    );
+    const cumulativeConflictEvents = hasStarted
+      ? conflictEvents.filter(event => Number(event.t0) <= currentTime)
+      : [];
 
     // 누적 충돌 피커: 각 누적 충돌 이벤트에 포함된 worker_ids 수를 합산.
     // 동일 피커가 여러 번 충돌하면 발생 횟수만큼 반복 누적한다.
@@ -1427,7 +1435,7 @@ def render_single_html(
 
       marker.c.setAttribute('cx', p.x.toFixed(3)); marker.c.setAttribute('cy', p.y.toFixed(3));
       marker.t.setAttribute('x', p.x.toFixed(3)); marker.t.setAttribute('y', p.y.toFixed(3));
-      marker.g.setAttribute('opacity', seg.kind === 'idle' ? '0.68' : '1');
+      marker.g.setAttribute('opacity', hasStarted && seg.kind === 'idle' ? '0.68' : '1');
 
       if (visible) states.push(`${{worker.worker_id}}(${{seg.kind}}${{colliding ? ', 충돌' : ''}})`);
     }});
@@ -1441,6 +1449,9 @@ def render_single_html(
       : '없음';
     const totalConflicts = Number(scenario.meta.congestion_conflicts || 0);
     const totalWait = Number(scenario.meta.congestion_wait_seconds || 0);
+    const stateText = hasStarted
+      ? `${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`
+      : '재생 대기';
 
     setStatus(`<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}<br>` +
       `<strong>실제 시간</strong> : ${{formatActualDateTime(currentTime)}}<br>` +
@@ -1451,7 +1462,7 @@ def render_single_html(
       `<strong>누적 충돌 이벤트</strong> : ${{cumulativeConflictEvents.length}}개 · <strong>누적 충돌 피커</strong> : ${{cumulativeConflictPickerCount}}명<br>` +
       `<strong>현재 충돌</strong> : ${{conflictPreview}}<br>` +
       `<strong>이벤트 소스</strong> : ${{hasExactConflictEvents ? '실제 DES resource contention' : '구버전 JSON · 실제 이벤트 없음'}}<br>` +
-      `<strong>상태</strong> : ${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`);
+      `<strong>상태</strong> : ${{stateText}}`);
   }}
 
   function availabilityFor(dateValue) {{
@@ -1500,6 +1511,7 @@ def render_single_html(
       if (!scenario) throw new Error(`시나리오가 없습니다: ${{currentDate}} / ${{currentMethod}}`);
 
       currentTime = 0;
+      hasStarted = false;
       slider.max = String(scenario.meta.simulation_end_seconds);
       slider.value = '0';
       document.getElementById('metaLists').textContent = scenario.meta.picking_lists;
@@ -1565,9 +1577,13 @@ def render_single_html(
   playBtn.addEventListener('click', () => playing ? stop() : start());
   speedSel.addEventListener('change', () => {{ lastTs = null; }});
   workerSel.addEventListener('change', e => {{ selectedWorker = e.target.value; render(); }});
-  slider.addEventListener('input', e => {{ currentTime = Number(e.target.value || 0); render(); }});
-  dateSel.addEventListener('change', e => {{ void loadScenario(e.target.value, currentMethod, true); }});
-  methodSel.addEventListener('change', e => {{ void loadScenario(currentDate, e.target.value, true); }});
+  slider.addEventListener('input', e => {{
+    hasStarted = true;
+    currentTime = Number(e.target.value || 0);
+    render();
+  }});
+  dateSel.addEventListener('change', e => {{ void loadScenario(e.target.value, currentMethod, false); }});
+  methodSel.addEventListener('change', e => {{ void loadScenario(currentDate, e.target.value, false); }});
 
   if (!dates.length) {{ setStatus('재생 가능한 날짜가 없습니다.', 'error'); }}
   else {{ void loadScenario(currentDate, currentMethod, false); }}
