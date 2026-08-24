@@ -31,6 +31,16 @@ J(n; lambda) = D(n) + lambda × R(n)
 Python 3.13이 필요합니다. 프로젝트 메타데이터와 런타임 의존성의 기준 파일은
 `pyproject.toml`입니다.
 
+## 환경 맞추기(파이썬 버전 3.13 관련 오류 발생시 실행)
+
+```bash
+conda deactivate
+conda env remove -n thesis-env
+conda create -n thesis-env python=3.13 -y
+conda activate thesis-env
+python -m pip install -e .
+```
+
 ### venv와 pip
 
 ```bash

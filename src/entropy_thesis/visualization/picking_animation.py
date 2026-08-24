@@ -29,11 +29,15 @@ from ..simulation.phase3 import (
     run_phase3_observed_baseline,
     zone_workload,
 )
-from ..simulation.phase4 import allocate_phase4_workers
+from ..simulation.phase4 import (
+    DEFAULT_MIN_LISTS_PER_DATE,
+    allocate_phase4_workers,
+)
 from ..simulation.warehouse import WarehouseGraph
 
 
 METHODS: tuple[str, ...] = ("observed", "equal", "random", "volume", "entropy")
+COMPARISON_METHODS: tuple[str, ...] = ("equal", "random", "volume", "entropy")
 METHOD_LABELS: dict[str, str] = {
     "observed": "Observed",
     "equal": "Equal",
@@ -338,13 +342,24 @@ def build_animation_payload(
             simulation_end_seconds=simulation_end_seconds,
             default_start_node=default_start_node,
         )
+        # Serialize only fields used by the browser animation. This removes
+        # duplicated raw CAD/node/wave metadata from every edge event and keeps
+        # the monthly JSON substantially smaller than the previous 1 GB HTML.
         svg_segments: list[dict[str, Any]] = []
         for segment in segments:
             sx0, sy0 = svg_transform.raw_to_svg(segment["x0"], segment["y0"])
             sx1, sy1 = svg_transform.raw_to_svg(segment["x1"], segment["y1"])
-            item = dict(segment)
-            item.update({"sx0": sx0, "sy0": sy0, "sx1": sx1, "sy1": sy1})
-            svg_segments.append(item)
+            svg_segments.append(
+                {
+                    "kind": segment["kind"],
+                    "t0": round(float(segment["t0"]), 3),
+                    "t1": round(float(segment["t1"]), 3),
+                    "sx0": round(float(sx0), 3),
+                    "sy0": round(float(sy0), 3),
+                    "sx1": round(float(sx1), 3),
+                    "sy1": round(float(sy1), 3),
+                }
+            )
 
         workers_payload.append(
             {
@@ -447,6 +462,29 @@ def _format_duration(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _comparison_eligibility(
+    *,
+    selected_lists: list[Any],
+    total_workers: int,
+    workloads: tuple[float, ...],
+    min_lists_per_date: int,
+) -> tuple[bool, str, int]:
+    """Phase 4와 동일한 핵심 날짜 적합성 조건을 애니메이션 내부에서만 검사한다."""
+
+    active_zones = sum(value > 0 for value in workloads)
+    required_workers = active_zones
+
+    if len(selected_lists) < min_lists_per_date:
+        return False, "too_few_lists", active_zones
+    if total_workers <= 0:
+        return False, "no_workers", active_zones
+    if active_zones <= 0:
+        return False, "no_active_zones", active_zones
+    if total_workers < required_workers:
+        return False, "insufficient_workers_for_active_zones", active_zones
+    return True, "eligible", active_zones
+
+
 def _simulate_date_methods(
     *,
     warehouse: WarehouseGraph,
@@ -462,6 +500,7 @@ def _simulate_date_methods(
     pick_node_capacity: int,
     progress: GenerationProgress,
     date_index: int,
+    min_lists_per_date: int,
 ) -> dict[str, Any]:
     zones = build_aisle_zones(warehouse, number_of_zones=4)
     assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
@@ -479,8 +518,52 @@ def _simulate_date_methods(
     )
     concentrations = tuple(profile.microzone_concentration for profile in profiles)
 
-    result: dict[str, Any] = {}
+    comparison_eligible, comparison_reason, active_zones = _comparison_eligibility(
+        selected_lists=selected_lists,
+        total_workers=total_workers,
+        workloads=workloads,
+        min_lists_per_date=min_lists_per_date,
+    )
+
+    result: dict[str, Any] = {
+        "__availability__": {
+            "comparison_eligible": comparison_eligible,
+            "reason": comparison_reason,
+            "active_zones": active_zones,
+            "observed_workers": total_workers,
+            "picking_lists": len(selected_lists),
+            "min_lists_per_date": min_lists_per_date,
+            "available_methods": (
+                list(methods)
+                if comparison_eligible
+                else [method for method in methods if method == "observed"]
+            ),
+        }
+    }
+
+    if not comparison_eligible:
+        print(
+            f"[INFO ] date={date_index:>3}/{progress.total_dates} "
+            f"{selected_date.isoformat()} | comparison unavailable | "
+            f"lists={len(selected_lists)}, workers={total_workers}, "
+            f"active_zones={active_zones}, min_lists={min_lists_per_date}, "
+            f"reason={comparison_reason}"
+        )
+
     for method_index, method in enumerate(methods, start=1):
+        # Observed는 Picking_Wave의 실제 작업자 배치를 그대로 재생한다.
+        # 비교 방법은 Phase 4 적합 조건을 만족하는 날짜에서만 생성한다.
+        if method != "observed" and not comparison_eligible:
+            print(
+                f"[SKIP ] date={date_index:>3}/{progress.total_dates} "
+                f"{selected_date.isoformat()} | "
+                f"method={METHOD_LABELS[method]:<8} | "
+                f"lists={len(selected_lists)} | workers={total_workers} | "
+                f"active_zones={active_zones} | reason={comparison_reason}"
+            )
+            progress.finish_scenario()
+            continue
+
         callback = progress.callback(
             date_index=date_index,
             date_value=selected_date,
@@ -586,14 +669,17 @@ def _simulate_date_methods(
 
     return result
 
-
 def render_single_html(
     *,
     svg_transform: SvgAxesTransform,
-    all_data: dict[str, Any],
+    manifest: dict[str, Any],
     entropy_lambda: float,
+    data_dir_name: str,
 ) -> str:
-    data_json = json.dumps(all_data, ensure_ascii=False, separators=(",", ":"))
+    """Render one lightweight HTML shell that lazily loads monthly JSON files."""
+
+    manifest_json = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+    data_dir_json = json.dumps(data_dir_name, ensure_ascii=False)
     method_options = "\n".join(
         f'<option value="{method}">{METHOD_LABELS[method]}</option>' for method in METHODS
     )
@@ -625,6 +711,8 @@ def render_single_html(
   .value {{ min-width: 0; font-variant-numeric: tabular-nums; }}
   .sidebar select {{ width: 100%; min-width: 0; }}
   .status {{ margin-top: 13px; background: #f7f9fc; border-radius: 11px; padding: 12px; font-size: 13px; line-height: 1.45; }}
+  .status.error {{ background: #fff3f3; color: #9b1c1c; }}
+  .status.loading {{ background: #f0f6ff; color: #244b76; }}
   .notes {{ margin-top: 14px; padding-bottom: 13px; border-bottom: 1px solid #e5e7eb; color: #455065; font-size: 12.5px; line-height: 1.5; }}
   .workers {{ margin-top: 12px; max-height: 430px; overflow: auto; }}
   .worker-row {{ display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 6px 0; font-size: 12.5px; }}
@@ -676,29 +764,33 @@ def render_single_html(
       <div class="kv">
         <div class="key">날짜</div><div class="value"><select id="dateSel" aria-label="날짜 선택"></select></div>
         <div class="key">방법</div><div class="value"><select id="methodSel" aria-label="배치 방법">{method_options}</select></div>
-        <div class="key">피킹리스트 수</div><div class="value" id="metaLists"></div>
-        <div class="key">작업자 수</div><div class="value" id="metaWorkers"></div>
-        <div class="key">총 재생시간</div><div class="value" id="metaDuration"></div>
+        <div class="key">피킹리스트 수</div><div class="value" id="metaLists">-</div>
+        <div class="key">작업자 수</div><div class="value" id="metaWorkers">-</div>
+        <div class="key">총 재생시간</div><div class="value" id="metaDuration">-</div>
       </div>
       <div class="allocation" id="allocationInfo"></div>
-      <div class="status" id="statusBox"></div>
+      <div class="status loading" id="statusBox">월별 데이터를 불러오는 중입니다.</div>
       <div class="notes">
         - 원형 마커는 작업자 현재 위치입니다.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
-        - 이동 중에는 graph edge를 따라 선형 보간합니다.<br />
-        - 날짜가 끝나면 같은 방법으로 다음 날짜가 자동 재생됩니다.<br />
+        - 월별 JSON을 필요할 때만 읽어 메모리 사용량을 줄입니다.<br />
+        - 날짜가 끝나면 같은 방법으로 다음 사용 가능 날짜가 자동 재생됩니다.<br />
         - Entropy는 λ*={entropy_lambda:g}를 사용합니다.
       </div>
       <div class="workers" id="workerList"></div>
     </aside>
   </div>
 </div>
-<script id="animationData" type="application/json">{data_json}</script>
+<script id="animationManifest" type="application/json">{manifest_json}</script>
 <script>
 (() => {{
-  const rootData = JSON.parse(document.getElementById('animationData').textContent);
-  const dates = rootData.date_order;
-  const scenarios = rootData.dates;
+  const manifest = JSON.parse(document.getElementById('animationManifest').textContent);
+  const dataDir = {data_dir_json};
+  const dates = manifest.date_order;
+  const monthByDate = manifest.month_by_date;
+  const monthFiles = manifest.month_files;
+  const availabilityIndex = manifest.availability_by_date;
+
   const overlay = document.getElementById('overlay');
   const dateSel = document.getElementById('dateSel');
   const methodSel = document.getElementById('methodSel');
@@ -726,6 +818,9 @@ def render_single_html(
   let selectedWorker = 'ALL';
   let markerMap = new Map();
   let workerIndices = new Map();
+  let loadedMonthKey = null;
+  let loadedMonthData = null;
+  let loadToken = 0;
 
   function formatSeconds(value) {{
     const total = Math.max(0, Math.floor(Number(value) || 0));
@@ -759,6 +854,42 @@ def render_single_html(
     playBtn.textContent = '⏸ 일시정지';
     lastTs = null;
     raf = requestAnimationFrame(tick);
+  }}
+
+  function setStatus(message, kind = '') {{
+    statusBox.className = `status${{kind ? ' ' + kind : ''}}`;
+    statusBox.innerHTML = message;
+  }}
+
+  function dataLoadError(error) {{
+    stop();
+    const localHint = location.protocol === 'file:'
+      ? '<br><br><strong>중요:</strong> 월별 JSON은 브라우저 보안정책 때문에 파일을 더블클릭(file://)해서는 읽지 못할 수 있습니다.' +
+        '<br>HTML이 있는 폴더에서 <code>python -m http.server 8000</code> 실행 후 ' +
+        '<code>http://localhost:8000/</code> 으로 접속해 주세요.'
+      : '';
+    setStatus(`<strong>데이터 로드 실패</strong><br>${{String(error.message || error)}}${{localHint}}`, 'error');
+  }}
+
+  async function loadMonth(monthKey) {{
+    if (loadedMonthKey === monthKey && loadedMonthData) return loadedMonthData;
+    const fileName = monthFiles[monthKey];
+    if (!fileName) throw new Error(`월별 데이터 파일 정보가 없습니다: ${{monthKey}}`);
+    setStatus(`<strong>${{monthKey}}</strong> 월 데이터를 불러오는 중...`, 'loading');
+    const response = await fetch(`${{dataDir}}/${{fileName}}`, {{cache: 'force-cache'}});
+    if (!response.ok) throw new Error(`HTTP ${{response.status}} · ${{dataDir}}/${{fileName}}`);
+    const data = await response.json();
+    loadedMonthKey = monthKey;
+    loadedMonthData = data;
+    return data;
+  }}
+
+  async function scenariosForDate(dateValue) {{
+    const monthKey = monthByDate[dateValue];
+    const monthData = await loadMonth(monthKey);
+    const dateScenarios = monthData.dates[dateValue];
+    if (!dateScenarios) throw new Error(`날짜 데이터를 찾지 못했습니다: ${{dateValue}}`);
+    return dateScenarios;
   }}
 
   function rebuildWorkers() {{
@@ -824,39 +955,97 @@ def render_single_html(
       states.push(`${{worker.worker_id}}(${{seg.kind}})`);
     }});
 
-    statusBox.innerHTML = `<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}<br>` +
+    setStatus(`<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}<br>` +
       `<strong>표시 작업자</strong> : ${{selectedWorker === 'ALL' ? '전체' : selectedWorker}}<br>` +
       `<strong>활성 마커 수</strong> : ${{states.length}}<br>` +
-      `<strong>상태</strong> : ${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`;
+      `<strong>상태</strong> : ${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`);
   }}
 
-  function loadScenario(dateValue, methodValue, autoPlay) {{
+  function availabilityFor(dateValue) {{
+    return availabilityIndex[dateValue] || {{
+      comparison_eligible: true,
+      reason: 'eligible',
+      available_methods: ['observed', 'equal', 'random', 'volume', 'entropy']
+    }};
+  }}
+
+  function reasonLabel(reason) {{
+    const labels = {{
+      too_few_lists: '피킹리스트 수가 비교 실험 기준보다 적음',
+      no_workers: '작업자가 없음',
+      no_active_zones: '활성 구역이 없음',
+      insufficient_workers_for_active_zones: '작업자 수가 활성 구역 수보다 적음',
+      eligible: '사용 가능'
+    }};
+    return labels[reason] || reason;
+  }}
+
+  function methodAvailable(dateValue, methodValue) {{
+    const info = availabilityFor(dateValue);
+    return (info.available_methods || ['observed']).includes(methodValue);
+  }}
+
+  function updateMethodOptions(dateValue) {{
+    const info = availabilityFor(dateValue);
+    const available = new Set(info.available_methods || ['observed']);
+    Array.from(methodSel.options).forEach(option => {{ option.disabled = !available.has(option.value); }});
+  }}
+
+  async function loadScenario(dateValue, methodValue, autoPlay) {{
+    const token = ++loadToken;
     stop();
     currentDate = dateValue;
-    currentMethod = methodValue;
-    scenario = scenarios[currentDate][currentMethod];
+    updateMethodOptions(currentDate);
+    currentMethod = methodAvailable(currentDate, methodValue) ? methodValue : 'observed';
     dateSel.value = currentDate;
     methodSel.value = currentMethod;
-    currentTime = 0;
-    slider.max = String(scenario.meta.simulation_end_seconds);
-    slider.value = '0';
-    document.getElementById('metaLists').textContent = scenario.meta.picking_lists;
-    document.getElementById('metaWorkers').textContent = scenario.meta.operators;
-    document.getElementById('metaDuration').textContent = formatSeconds(scenario.meta.simulation_end_seconds);
-    const counts = scenario.meta.worker_counts;
-    let allocationText = '';
-    if (Array.isArray(counts)) allocationText += `구역 인원: [${{counts.join(', ')}}]`;
-    if (scenario.meta.entropy_lambda !== null) allocationText += `${{allocationText ? ' · ' : ''}}λ=${{scenario.meta.entropy_lambda}}`;
-    allocationInfo.textContent = allocationText;
-    rebuildWorkers();
-    render();
-    if (autoPlay) start();
+
+    try {{
+      const dateScenarios = await scenariosForDate(currentDate);
+      if (token !== loadToken) return;
+      scenario = dateScenarios[currentMethod] || dateScenarios.observed;
+      if (!scenario) throw new Error(`시나리오가 없습니다: ${{currentDate}} / ${{currentMethod}}`);
+
+      currentTime = 0;
+      slider.max = String(scenario.meta.simulation_end_seconds);
+      slider.value = '0';
+      document.getElementById('metaLists').textContent = scenario.meta.picking_lists;
+      document.getElementById('metaWorkers').textContent = scenario.meta.operators;
+      document.getElementById('metaDuration').textContent = formatSeconds(scenario.meta.simulation_end_seconds);
+
+      const counts = scenario.meta.worker_counts;
+      const availability = availabilityFor(currentDate);
+      let allocationText = '';
+      if (Array.isArray(counts)) allocationText += `구역 인원: [${{counts.join(', ')}}]`;
+      if (scenario.meta.entropy_lambda !== null) allocationText += `${{allocationText ? ' · ' : ''}}λ=${{scenario.meta.entropy_lambda}}`;
+      if (!availability.comparison_eligible) {{
+        allocationText += `${{allocationText ? ' · ' : ''}}비교방법 사용 불가 · ${{reasonLabel(availability.reason)}}` +
+          ` · workers=${{availability.observed_workers}} · active zones=${{availability.active_zones}}`;
+      }}
+      allocationInfo.textContent = allocationText;
+
+      rebuildWorkers();
+      render();
+      if (autoPlay) start();
+    }} catch (error) {{
+      if (token === loadToken) dataLoadError(error);
+    }}
   }}
 
-  function advanceDate() {{
+  async function advanceDate() {{
     const idx = dates.indexOf(currentDate);
     if (idx < 0 || idx >= dates.length - 1) {{ stop(); return; }}
-    loadScenario(dates[idx + 1], currentMethod, true);
+    if (currentMethod === 'observed') {{
+      await loadScenario(dates[idx + 1], 'observed', true);
+      return;
+    }}
+    for (let next = idx + 1; next < dates.length; next++) {{
+      if (methodAvailable(dates[next], currentMethod)) {{
+        await loadScenario(dates[next], currentMethod, true);
+        return;
+      }}
+    }}
+    stop();
   }}
 
   function tick(ts) {{
@@ -868,7 +1057,8 @@ def render_single_html(
     if (currentTime >= scenario.meta.simulation_end_seconds) {{
       currentTime = scenario.meta.simulation_end_seconds;
       render();
-      advanceDate();
+      stop();
+      void advanceDate();
       return;
     }}
     render();
@@ -879,14 +1069,67 @@ def render_single_html(
   speedSel.addEventListener('change', () => {{ lastTs = null; }});
   workerSel.addEventListener('change', e => {{ selectedWorker = e.target.value; render(); }});
   slider.addEventListener('input', e => {{ currentTime = Number(e.target.value || 0); render(); }});
-  dateSel.addEventListener('change', e => loadScenario(e.target.value, currentMethod, true));
-  methodSel.addEventListener('change', e => loadScenario(currentDate, e.target.value, true));
+  dateSel.addEventListener('change', e => {{ void loadScenario(e.target.value, currentMethod, true); }});
+  methodSel.addEventListener('change', e => {{ void loadScenario(currentDate, e.target.value, true); }});
 
-  loadScenario(currentDate, currentMethod, false);
+  if (!dates.length) {{ setStatus('재생 가능한 날짜가 없습니다.', 'error'); }}
+  else {{ void loadScenario(currentDate, currentMethod, false); }}
 }})();
 </script>
 </body>
 </html>'''
+
+def _month_key(value: date) -> str:
+    return value.strftime("%Y-%m")
+
+
+def _data_directory_for(output_html: Path) -> Path:
+    return output_html.with_name(f"{output_html.stem}_data")
+
+
+def _prepare_data_directory(output_html: Path) -> Path:
+    data_dir = _data_directory_for(output_html)
+    if data_dir.exists():
+        print(f"[CLEAN] Removing previous monthly data directory: {data_dir}")
+        shutil.rmtree(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir
+
+
+def _write_month_json(
+    *,
+    data_dir: Path,
+    month_key: str,
+    dates_payload: dict[str, Any],
+    entropy_lambda: float,
+    seed: int,
+) -> tuple[str, float]:
+    file_name = f"{month_key}.json"
+    path = data_dir / file_name
+    payload = {
+        "meta": {
+            "format": "monthly-date-method-json-v4",
+            "month": month_key,
+            "entropy_lambda": entropy_lambda,
+            "seed": seed,
+        },
+        "dates": dates_payload,
+    }
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    size_mb = path.stat().st_size / (1024 * 1024)
+    print(f"[JSON ] {month_key} -> {path.name} | dates={len(dates_payload)} | size={size_mb:.1f} MB")
+    return file_name, size_mb
+
+
+def _print_browser_open_instructions(output_html: Path) -> None:
+    print("[OPEN ] Monthly JSON is loaded with browser fetch().")
+    print("[OPEN ] If file:// is blocked, serve the output directory locally:")
+    print(f"[OPEN ]   cd {output_html.parent}")
+    print("[OPEN ]   python -m http.server 8000")
+    print(f"[OPEN ]   http://localhost:8000/{output_html.name}")
 
 
 def _remove_legacy_date_directories(output_html: Path) -> None:
@@ -912,12 +1155,15 @@ def generate_all_dates_single_html(
     edge_capacity: int = 1,
     pick_node_capacity: int = 1,
 ) -> Path:
+    """Generate one lightweight HTML plus one JSON file per calendar month."""
+
     data_dir = Path(data_dir)
     output_html = Path(output_html)
     output_html.parent.mkdir(parents=True, exist_ok=True)
     _remove_legacy_date_directories(output_html)
+    monthly_data_dir = _prepare_data_directory(output_html)
 
-    print("[MODE ] Single HTML + embedded date/method JSON (no per-date HTML)")
+    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json patch v4")
     print(f"[LOAD ] Loading dataset: {data_dir}")
     bundle = load_dataset(data_dir)
     print("[GRAPH] Building deterministic warehouse graph")
@@ -926,18 +1172,46 @@ def generate_all_dates_single_html(
         bundle.support_points,
         deterministic_order=True,
     )
-    transform = parse_svg_axes_transform(
-        layout_svg,
-        support_points=bundle.support_points,
-    )
+    transform = parse_svg_axes_transform(layout_svg, support_points=bundle.support_points)
     selected_lambda = _read_entropy_lambda(data_dir, entropy_lambda)
 
     dates = available_phase2_dates(warehouse, bundle.picking_lists)
     if not dates:
         raise ValueError("애니메이션으로 생성할 fully-valid 날짜가 없습니다.")
 
+    comparison_min_lists = (
+        DEFAULT_MIN_LISTS_PER_DATE
+        if max_lists is None
+        else min(DEFAULT_MIN_LISTS_PER_DATE, max_lists)
+    )
+    print(
+        f"[RULE ] Comparison eligibility | min_lists={comparison_min_lists}, "
+        "minimum_per_active_zone=1"
+    )
+
     progress = GenerationProgress(len(dates), METHODS)
-    date_payloads: dict[str, Any] = {}
+    month_files: dict[str, str] = {}
+    month_by_date: dict[str, str] = {}
+    availability_by_date: dict[str, Any] = {}
+    current_month: str | None = None
+    current_month_payload: dict[str, Any] = {}
+    total_json_mb = 0.0
+
+    def flush_month() -> None:
+        nonlocal current_month_payload, total_json_mb
+        if current_month is None or not current_month_payload:
+            return
+        file_name, size_mb = _write_month_json(
+            data_dir=monthly_data_dir,
+            month_key=current_month,
+            dates_payload=current_month_payload,
+            entropy_lambda=selected_lambda,
+            seed=seed,
+        )
+        month_files[current_month] = file_name
+        total_json_mb += size_mb
+        current_month_payload = {}
+
     for date_index, target_date in enumerate(dates, start=1):
         selected_date, selected_lists = select_phase2_lists(
             warehouse,
@@ -945,7 +1219,12 @@ def generate_all_dates_single_html(
             target_date=target_date,
             max_lists=max_lists,
         )
-        date_payloads[selected_date.isoformat()] = _simulate_date_methods(
+        month_key = _month_key(selected_date)
+        if current_month is not None and month_key != current_month:
+            flush_month()
+        current_month = month_key
+
+        methods_data = _simulate_date_methods(
             warehouse=warehouse,
             selected_date=selected_date,
             selected_lists=selected_lists,
@@ -959,32 +1238,45 @@ def generate_all_dates_single_html(
             pick_node_capacity=pick_node_capacity,
             progress=progress,
             date_index=date_index,
+            min_lists_per_date=comparison_min_lists,
         )
+        date_text = selected_date.isoformat()
+        current_month_payload[date_text] = methods_data
+        month_by_date[date_text] = month_key
+        availability_by_date[date_text] = methods_data["__availability__"]
 
-    all_data = {
+    flush_month()
+
+    manifest = {
         "meta": {
-            "format": "single-html-date-method-json-v2",
+            "format": "html-manifest-monthly-json-v4",
             "entropy_lambda": selected_lambda,
             "seed": seed,
             "coordinate_calibration_points": transform.calibration_points,
             "coordinate_max_residual_px": transform.max_residual_px,
+            "months": len(month_files),
         },
         "date_order": [value.isoformat() for value in dates],
-        "dates": date_payloads,
+        "month_by_date": month_by_date,
+        "month_files": month_files,
+        "availability_by_date": availability_by_date,
     }
 
-    print(f"[PACK ] Serializing {len(dates)} dates × {len(METHODS)} methods into one HTML")
+    print(f"[PACK ] Writing lightweight HTML manifest | months={len(month_files)}")
     html = render_single_html(
         svg_transform=transform,
-        all_data=all_data,
+        manifest=manifest,
         entropy_lambda=selected_lambda,
+        data_dir_name=monthly_data_dir.name,
     )
     output_html.write_text(html, encoding="utf-8")
-    size_mb = output_html.stat().st_size / (1024 * 1024)
+    html_mb = output_html.stat().st_size / (1024 * 1024)
     elapsed = time.monotonic() - progress.started
-    print(f"[WRITE] {output_html} | size={size_mb:.1f} MB")
-    print(f"[DONE ] {len(dates)} dates × {len(METHODS)} methods | elapsed={_format_duration(elapsed)}")
-    print("[DONE ] Exactly one HTML was generated; all scenario data is embedded JSON.")
+    print(f"[WRITE] HTML  : {output_html} | size={html_mb:.2f} MB")
+    print(f"[WRITE] JSON  : {monthly_data_dir} | months={len(month_files)} | total={total_json_mb:.1f} MB")
+    print(f"[DONE ] dates={len(dates)} | elapsed={_format_duration(elapsed)}")
+    print("[DONE ] Simulation data is no longer embedded in the HTML.")
+    _print_browser_open_instructions(output_html)
     return output_html
 
 
@@ -1006,7 +1298,9 @@ def generate_single_date_html(
     output_html = Path(output_html)
     output_html.parent.mkdir(parents=True, exist_ok=True)
     _remove_legacy_date_directories(output_html)
+    monthly_data_dir = _prepare_data_directory(output_html)
 
+    print("[MODE ] Lightweight HTML + external monthly JSON | single-date")
     bundle = load_dataset(data_dir)
     warehouse = WarehouseGraph.build(
         bundle.storage_locations,
@@ -1020,6 +1314,11 @@ def generate_single_date_html(
         bundle.picking_lists,
         target_date=target_date,
         max_lists=max_lists,
+    )
+    comparison_min_lists = (
+        DEFAULT_MIN_LISTS_PER_DATE
+        if max_lists is None
+        else min(DEFAULT_MIN_LISTS_PER_DATE, max_lists)
     )
     progress = GenerationProgress(1, METHODS)
     methods_data = _simulate_date_methods(
@@ -1036,25 +1335,75 @@ def generate_single_date_html(
         pick_node_capacity=pick_node_capacity,
         progress=progress,
         date_index=1,
+        min_lists_per_date=comparison_min_lists,
     )
-    all_data = {
-        "meta": {"format": "single-html-date-method-json-v2", "entropy_lambda": selected_lambda, "seed": seed},
-        "date_order": [selected_date.isoformat()],
-        "dates": {selected_date.isoformat(): methods_data},
+
+    date_text = selected_date.isoformat()
+    month_key = _month_key(selected_date)
+    file_name, _ = _write_month_json(
+        data_dir=monthly_data_dir,
+        month_key=month_key,
+        dates_payload={date_text: methods_data},
+        entropy_lambda=selected_lambda,
+        seed=seed,
+    )
+    manifest = {
+        "meta": {
+            "format": "html-manifest-monthly-json-v4",
+            "entropy_lambda": selected_lambda,
+            "seed": seed,
+            "months": 1,
+        },
+        "date_order": [date_text],
+        "month_by_date": {date_text: month_key},
+        "month_files": {month_key: file_name},
+        "availability_by_date": {date_text: methods_data["__availability__"]},
     }
     output_html.write_text(
-        render_single_html(svg_transform=transform, all_data=all_data, entropy_lambda=selected_lambda),
+        render_single_html(
+            svg_transform=transform,
+            manifest=manifest,
+            entropy_lambda=selected_lambda,
+            data_dir_name=monthly_data_dir.name,
+        ),
         encoding="utf-8",
     )
     print(f"[DONE ] Single-date HTML saved to: {output_html}")
+    _print_browser_open_instructions(output_html)
     return output_html
+
+
+def _serve_output(output_html: Path, port: int) -> None:
+    """Serve the generated HTML/JSON folder so browser fetch() works locally."""
+
+    import functools
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    import webbrowser
+
+    if port <= 0 or port > 65535:
+        raise ValueError("--port는 1~65535 범위여야 합니다.")
+
+    directory = output_html.parent.resolve()
+    handler = functools.partial(SimpleHTTPRequestHandler, directory=str(directory))
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    url = f"http://127.0.0.1:{port}/{output_html.name}"
+    print(f"[SERVE] directory={directory}")
+    print(f"[SERVE] {url}")
+    print("[SERVE] Ctrl+C to stop.")
+    webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[SERVE] stopped")
+    finally:
+        server.server_close()
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a single interactive warehouse picking animation HTML with "
-            "Observed/Equal/Random/Volume/Entropy method switching."
+            "Generate one lightweight warehouse animation HTML plus monthly JSON data "
+            "for Observed/Equal/Random/Volume/Entropy switching."
         )
     )
     parser.add_argument("--data-dir", default="data/raw")
@@ -1069,6 +1418,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pick-seconds-per-unit", type=float, default=3.0)
     parser.add_argument("--edge-capacity", type=int, default=1)
     parser.add_argument("--pick-node-capacity", type=int, default=1)
+    parser.add_argument("--serve", action="store_true", help="serve generated HTML/JSON over localhost")
+    parser.add_argument("--port", type=int, default=8000, help="localhost port used with --serve")
     return parser.parse_args()
 
 
@@ -1092,9 +1443,12 @@ def main() -> None:
         pick_node_capacity=args.pick_node_capacity,
     )
     if args.all_dates:
-        generate_all_dates_single_html(**common)
+        output = generate_all_dates_single_html(**common)
     else:
-        generate_single_date_html(target_date=date.fromisoformat(args.date), **common)
+        output = generate_single_date_html(target_date=date.fromisoformat(args.date), **common)
+
+    if args.serve:
+        _serve_output(output, args.port)
 
 
 if __name__ == "__main__":
