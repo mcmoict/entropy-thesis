@@ -353,6 +353,7 @@ _WAIT_START_ATTRS: tuple[str, ...] = (
 _WAIT_END_ATTRS: tuple[str, ...] = (
     "wait_finished_at",
     "waiting_finished_at",
+    "entered_at",
     "acquired_at",
     "resource_acquired_at",
     "granted_at",
@@ -462,7 +463,7 @@ def _event_resource_info(
     event_kind: str | None,
 ) -> tuple[str, str | None, str | None]:
     resource_type = str(
-        _first_attr(event, ("resource_type", "contention_type", "kind", "type"))
+        _first_attr(event, ("resource_kind", "resource_type", "contention_type", "kind", "type"))
         or ("edge" if event_kind == "move" else "pick_node" if event_kind == "pick" else "resource")
     )
 
@@ -730,9 +731,18 @@ def build_animation_payload(
             }
         )
 
+    origin_timestamp = None
+    created_times = [
+        item.created_at for item in selected_lists
+        if getattr(item, "created_at", None) is not None
+    ]
+    if created_times:
+        origin_timestamp = min(created_times).isoformat()
+
     return {
         "meta": {
             "selected_date": selected_date.isoformat(),
+            "origin_timestamp": origin_timestamp,
             "method": method,
             "method_label": METHOD_LABELS[method],
             "picking_lists": len(selected_lists),
@@ -1149,7 +1159,6 @@ def render_single_html(
       <div class="notes">
         - 원형 마커는 작업자 현재 위치입니다.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
-        - 월별 JSON을 필요할 때만 읽어 메모리 사용량을 줄입니다.<br />
         - 논문의 Conflicts와 동일한 DES resource contention 대기 구간에만 해당 피커가 빨간색으로 표시됩니다.<br />
         - '다음 날짜 자동실행' 체크 시 날짜가 끝나면 같은 방법의 다음 사용 가능 날짜를 자동 재생합니다.<br />
         - 체크를 해제하면 현재 날짜의 재생 종료 시 그 자리에서 정지합니다.<br />
@@ -1225,6 +1234,38 @@ def render_single_html(
     const m = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
     const s = String(total % 60).padStart(2, '0');
     return `${{h}}:${{m}}:${{s}}`;
+  }}
+
+  function formatActualDateTime(elapsedSeconds) {{
+    const originText = scenario && scenario.meta ? scenario.meta.origin_timestamp : null;
+    if (!originText) return '-';
+
+    // ISO timestamp의 날짜/시간 부분을 직접 계산하여 브라우저 timezone 변환에
+    // 의해 시각이 바뀌지 않도록 한다.
+    const match = String(originText).match(
+      /^(\\d{{4}})-(\\d{{2}})-(\\d{{2}})T(\\d{{2}}):(\\d{{2}}):(\\d{{2}}(?:\\.\\d+)?)/
+    );
+    if (!match) return String(originText);
+
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    const hour = Number(match[4]);
+    const minute = Number(match[5]);
+    const second = Number(match[6]);
+
+    // UTC 계산 함수를 단순 calendar arithmetic 용도로만 사용한다.
+    // 입력 timestamp의 timezone을 변환하려는 목적이 아니다.
+    const originMs = Date.UTC(year, month - 1, day, hour, minute, Math.floor(second));
+    const actual = new Date(originMs + Math.max(0, Number(elapsedSeconds) || 0) * 1000);
+
+    const yyyy = actual.getUTCFullYear();
+    const mm = String(actual.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(actual.getUTCDate()).padStart(2, '0');
+    const hh = String(actual.getUTCHours()).padStart(2, '0');
+    const mi = String(actual.getUTCMinutes()).padStart(2, '0');
+    const ss = String(actual.getUTCSeconds()).padStart(2, '0');
+    return `${{yyyy}}-${{mm}}-${{dd}} ${{hh}}:${{mi}}:${{ss}}`;
   }}
 
   function colorForIndex(i) {{ return `hsl(${{(i * 47) % 360}} 70% 52%)`; }}
@@ -1402,6 +1443,7 @@ def render_single_html(
     const totalWait = Number(scenario.meta.congestion_wait_seconds || 0);
 
     setStatus(`<strong>현재 시간</strong> : ${{formatSeconds(currentTime)}}<br>` +
+      `<strong>실제 시간</strong> : ${{formatActualDateTime(currentTime)}}<br>` +
       `<strong>표시 작업자</strong> : ${{selectedWorker === 'ALL' ? '전체' : selectedWorker}}<br>` +
       `<strong>활성 마커 수</strong> : ${{states.length}}<br>` +
       `<strong>DES Conflicts</strong> : ${{totalConflicts}}회 · <strong>총 대기</strong> : ${{totalWait.toFixed(2)}}초<br>` +

@@ -39,8 +39,8 @@ python -m entropy_thesis.visualization.picking_animation_actual --all-dates --se
 
 생성 결과:
 
-results\figures\picking_animation_actual.html
-results\figures\picking_animation_actual_data\
+results/figures/picking_animation_actual.html
+results/figures/picking_animation_actual_data\
     2023-01.json
     2023-02.json
     ...
