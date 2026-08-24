@@ -14,7 +14,12 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from ..simulation.data_loader import DEFAULT_COORDINATE_UNIT, coordinate_scale_to_meter, load_dataset
+from ..simulation.data_loader import (
+    DEFAULT_COORDINATE_UNIT,
+    coordinate_scale_to_meter,
+    load_dataset,
+    load_support_points,
+)
 from ..simulation.phase2 import (
     available_phase2_dates,
     calculate_demand_entropy,
@@ -762,7 +767,7 @@ def render_single_html(
 
     <aside class="sidebar">
       <div class="kv">
-        <div class="key">날짜</div><div class="value"><select id="dateSel" aria-label="날짜 선택"></select></div>
+        <div class="key">날짜 <span id="dateCountBadge"></span></div><div class="value"><select id="dateSel" aria-label="날짜 선택"></select></div>
         <div class="key">방법</div><div class="value"><select id="methodSel" aria-label="배치 방법">{method_options}</select></div>
         <div class="key">피킹리스트 수</div><div class="value" id="metaLists">-</div>
         <div class="key">작업자 수</div><div class="value" id="metaWorkers">-</div>
@@ -802,10 +807,25 @@ def render_single_html(
   const workerList = document.getElementById('workerList');
   const statusBox = document.getElementById('statusBox');
   const allocationInfo = document.getElementById('allocationInfo');
+  const dateCountBadge = document.getElementById('dateCountBadge');
+
+  dateCountBadge.textContent = `(${{dates.length}})`;
+
+  function observedWorkerCountFor(dateValue) {{
+    const info = availabilityIndex[dateValue];
+    if (info && Number.isFinite(Number(info.observed_workers))) {{
+      return Number(info.observed_workers);
+    }}
+    return 0;
+  }}
 
   dates.forEach(d => {{
     const opt = document.createElement('option');
-    opt.value = d; opt.textContent = d; dateSel.appendChild(opt);
+    const pickerCount = observedWorkerCountFor(d);
+    opt.value = d;
+    opt.textContent = `${{d}} (${{pickerCount}})`;
+    opt.title = `날짜=${{d}}, 피커=${{pickerCount}}명`;
+    dateSel.appendChild(opt);
   }});
 
   let currentDate = dates[0];
@@ -1142,6 +1162,194 @@ def _remove_legacy_date_directories(output_html: Path) -> None:
             shutil.rmtree(path)
 
 
+
+def _availability_from_month_date_payload(date_payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the date-level availability metadata stored in a monthly JSON file.
+
+    v4 monthly JSON files already contain ``__availability__``.  The fallback is
+    intentionally conservative so that HTML-only rebuilding can also tolerate an
+    older monthly file that has an Observed scenario but no explicit availability
+    object.
+    """
+
+    availability = date_payload.get("__availability__")
+    if isinstance(availability, dict):
+        return availability
+
+    observed = date_payload.get("observed")
+    observed_workers = 0
+    picking_lists = 0
+    if isinstance(observed, dict):
+        meta = observed.get("meta")
+        if isinstance(meta, dict):
+            observed_workers = int(meta.get("operators") or 0)
+            picking_lists = int(meta.get("picking_lists") or 0)
+
+    available_methods = [
+        method for method in METHODS if isinstance(date_payload.get(method), dict)
+    ]
+    comparison_methods_present = all(
+        method in available_methods for method in COMPARISON_METHODS
+    )
+    return {
+        "comparison_eligible": comparison_methods_present,
+        "reason": "eligible" if comparison_methods_present else "availability_metadata_missing",
+        "active_zones": None,
+        "observed_workers": observed_workers,
+        "picking_lists": picking_lists,
+        "min_lists_per_date": None,
+        "available_methods": available_methods or ["observed"],
+    }
+
+
+def regenerate_html_from_existing_json(
+    *,
+    data_dir: str | Path,
+    layout_svg: str | Path,
+    output_html: str | Path,
+    entropy_lambda: float | None,
+) -> Path:
+    """Rebuild only the lightweight HTML shell from existing monthly JSON files.
+
+    No simulation is executed and no monthly JSON file is rewritten or deleted.
+    The manifest required by the browser is reconstructed by scanning the existing
+    ``<output-stem>_data/*.json`` files.
+    """
+
+    data_dir = Path(data_dir)
+    output_html = Path(output_html)
+    output_html.parent.mkdir(parents=True, exist_ok=True)
+    monthly_data_dir = _data_directory_for(output_html)
+
+    if not monthly_data_dir.exists():
+        raise FileNotFoundError(
+            "--html-only에 사용할 월별 JSON 디렉터리가 없습니다: "
+            f"{monthly_data_dir}"
+        )
+
+    json_paths = sorted(monthly_data_dir.glob("*.json"))
+    if not json_paths:
+        raise FileNotFoundError(
+            "--html-only에 사용할 월별 JSON 파일이 없습니다: "
+            f"{monthly_data_dir}"
+        )
+
+    print("[MODE ] HTML-only rebuild from existing monthly JSON | v5")
+    print(f"[DATA ] Existing JSON directory: {monthly_data_dir}")
+    print(f"[SCAN ] Monthly JSON files: {len(json_paths)}")
+
+    month_files: dict[str, str] = {}
+    month_by_date: dict[str, str] = {}
+    availability_by_date: dict[str, Any] = {}
+    date_values: set[str] = set()
+    discovered_lambda: float | None = None
+    discovered_seed = 42
+
+    for json_path in json_paths:
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"월별 JSON 파싱 실패: {json_path}") from exc
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"월별 JSON 루트가 object가 아닙니다: {json_path}")
+
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        month_key = str(meta.get("month") or json_path.stem)
+        dates_payload = payload.get("dates")
+        if not isinstance(dates_payload, dict):
+            raise ValueError(f"월별 JSON의 dates object가 없습니다: {json_path}")
+
+        month_files[month_key] = json_path.name
+
+        if discovered_lambda is None:
+            try:
+                candidate = float(meta.get("entropy_lambda"))
+            except (TypeError, ValueError):
+                candidate = float("nan")
+            if math.isfinite(candidate) and candidate >= 0:
+                discovered_lambda = candidate
+        try:
+            discovered_seed = int(meta.get("seed", discovered_seed))
+        except (TypeError, ValueError):
+            pass
+
+        for date_text, date_payload in dates_payload.items():
+            if not isinstance(date_payload, dict):
+                continue
+            date_text = str(date_text)
+            # Validate ISO date while preserving the original YYYY-MM-DD string.
+            date.fromisoformat(date_text)
+            date_values.add(date_text)
+            month_by_date[date_text] = month_key
+            availability_by_date[date_text] = _availability_from_month_date_payload(
+                date_payload
+            )
+
+        print(
+            f"[SCAN ] {json_path.name:<12} | month={month_key} | "
+            f"dates={len(dates_payload)} | size={json_path.stat().st_size / (1024*1024):.1f} MB"
+        )
+
+    if not date_values:
+        raise ValueError("월별 JSON에서 날짜를 하나도 찾지 못했습니다.")
+
+    if entropy_lambda is not None:
+        selected_lambda = float(entropy_lambda)
+        if not math.isfinite(selected_lambda) or selected_lambda < 0:
+            raise ValueError("--entropy-lambda는 0 이상의 유한한 값이어야 합니다.")
+    elif discovered_lambda is not None:
+        selected_lambda = discovered_lambda
+    else:
+        selected_lambda = _read_entropy_lambda(data_dir, None)
+
+    support_path = data_dir / "Support_Points_Navigation.csv"
+    if not support_path.exists():
+        raise FileNotFoundError(
+            "HTML의 SVG 좌표 보정에 필요한 파일이 없습니다: "
+            f"{support_path}"
+        )
+    support_points = load_support_points(support_path)
+    transform = parse_svg_axes_transform(
+        layout_svg,
+        support_points=support_points,
+    )
+
+    date_order = sorted(date_values)
+    manifest = {
+        "meta": {
+            "format": "html-manifest-monthly-json-v5-html-only",
+            "entropy_lambda": selected_lambda,
+            "seed": discovered_seed,
+            "coordinate_calibration_points": transform.calibration_points,
+            "coordinate_max_residual_px": transform.max_residual_px,
+            "months": len(month_files),
+        },
+        "date_order": date_order,
+        "month_by_date": month_by_date,
+        "month_files": month_files,
+        "availability_by_date": availability_by_date,
+    }
+
+    html = render_single_html(
+        svg_transform=transform,
+        manifest=manifest,
+        entropy_lambda=selected_lambda,
+        data_dir_name=monthly_data_dir.name,
+    )
+    output_html.write_text(html, encoding="utf-8")
+    html_mb = output_html.stat().st_size / (1024 * 1024)
+
+    print(
+        f"[WRITE] HTML only: {output_html} | size={html_mb:.2f} MB | "
+        f"dates={len(date_order)} | months={len(month_files)}"
+    )
+    print("[KEEP ] Existing monthly JSON files were not modified.")
+    _print_browser_open_instructions(output_html)
+    return output_html
+
 def generate_all_dates_single_html(
     *,
     data_dir: str | Path,
@@ -1418,6 +1626,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--pick-seconds-per-unit", type=float, default=3.0)
     parser.add_argument("--edge-capacity", type=int, default=1)
     parser.add_argument("--pick-node-capacity", type=int, default=1)
+    parser.add_argument(
+        "--html-only",
+        action="store_true",
+        help="rebuild only HTML from existing monthly JSON; do not rerun simulation or rewrite JSON",
+    )
     parser.add_argument("--serve", action="store_true", help="serve generated HTML/JSON over localhost")
     parser.add_argument("--port", type=int, default=8000, help="localhost port used with --serve")
     return parser.parse_args()
@@ -1425,10 +1638,26 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+
+    if args.html_only:
+        if args.all_dates or args.date is not None:
+            raise ValueError("--html-only는 --all-dates/--date와 함께 사용하지 않습니다.")
+        output = regenerate_html_from_existing_json(
+            data_dir=args.data_dir,
+            layout_svg=args.layout_svg,
+            output_html=args.output_html,
+            entropy_lambda=args.entropy_lambda,
+        )
+        if args.serve:
+            _serve_output(output, args.port)
+        return
+
     if args.all_dates and args.date is not None:
         raise ValueError("--all-dates와 --date는 동시에 사용할 수 없습니다.")
     if not args.all_dates and args.date is None:
-        raise ValueError("--all-dates 또는 --date YYYY-MM-DD 중 하나를 지정해 주세요.")
+        raise ValueError(
+            "--all-dates, --date YYYY-MM-DD 또는 --html-only 중 하나를 지정해 주세요."
+        )
 
     common = dict(
         data_dir=args.data_dir,
