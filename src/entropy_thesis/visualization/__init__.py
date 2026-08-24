@@ -93,4 +93,6 @@ python -m entropy_thesis.visualization.picking_animation_actual --html-only
 
 앞으로 Python에서 실제 충돌 데이터 생성 로직을 수정하면 ①, 화면 디자인이나 JavaScript만 수정하면 ② 또는 ③을 사용하시면 됩니다.
 
+http://localhost:8000/picking_animation_actual.html
+
 """

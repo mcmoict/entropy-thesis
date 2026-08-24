@@ -1067,6 +1067,9 @@ def render_single_html(
   #overlay .marker.collision circle {{ fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }}
   #overlay .marker.collision text {{ fill: #fff; }}
   .controls {{ display: grid; grid-template-columns: auto 76px 150px minmax(120px,1fr) 74px; gap: 9px; align-items: center; padding: 8px 0 0; }}
+  .play-options {{ display: flex; justify-content: flex-start; align-items: center; gap: 12px; padding: 7px 2px 0; font-size: 13px; color: #455065; }}
+  .play-option-label {{ display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }}
+  .play-option-label input[type="checkbox"] {{ width: 16px; height: 16px; margin: 0; cursor: pointer; }}
   button, select {{ min-height: 38px; border: 1px solid #d6dce5; border-radius: 9px; background: #fff; color: #172033; padding: 7px 10px; font-size: 14px; }}
   button {{ cursor: pointer; white-space: nowrap; }}
   input[type="range"] {{ width: 100%; }}
@@ -1096,6 +1099,7 @@ def render_single_html(
     .app {{ padding: 8px; }}
     .controls {{ grid-template-columns: 1fr 1fr; }}
     .controls input[type="range"] {{ grid-column: 1 / -1; }}
+    .play-options {{ padding-top: 9px; }}
     #timeLabel {{ text-align: left; }}
   }}
 </style>
@@ -1124,6 +1128,12 @@ def render_single_html(
         <input id="timeSlider" type="range" min="0" max="1" step="0.1" value="0" aria-label="재생 시간" />
         <div id="timeLabel">00:00:00</div>
       </div>
+      <div class="play-options">
+        <label class="play-option-label" for="autoNextDateChk">
+          <input id="autoNextDateChk" type="checkbox" checked />
+          <span>다음 날짜 자동실행</span>
+        </label>
+      </div>
     </main>
 
     <aside class="sidebar">
@@ -1141,7 +1151,8 @@ def render_single_html(
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
         - 월별 JSON을 필요할 때만 읽어 메모리 사용량을 줄입니다.<br />
         - 논문의 Conflicts와 동일한 DES resource contention 대기 구간에만 해당 피커가 빨간색으로 표시됩니다.<br />
-        - 날짜가 끝나면 같은 방법으로 다음 사용 가능 날짜가 자동 재생됩니다.<br />
+        - '다음 날짜 자동실행' 체크 시 날짜가 끝나면 같은 방법의 다음 사용 가능 날짜를 자동 재생합니다.<br />
+        - 체크를 해제하면 현재 날짜의 재생 종료 시 그 자리에서 정지합니다.<br />
         - Entropy는 λ*={entropy_lambda:g}를 사용합니다.
       </div>
       <div class="workers" id="workerList"></div>
@@ -1164,6 +1175,7 @@ def render_single_html(
   const workerSel = document.getElementById('workerSel');
   const speedSel = document.getElementById('speedSel');
   const playBtn = document.getElementById('playBtn');
+  const autoNextDateChk = document.getElementById('autoNextDateChk');
   const slider = document.getElementById('timeSlider');
   const timeLabel = document.getElementById('timeLabel');
   const workerList = document.getElementById('workerList');
@@ -1497,7 +1509,11 @@ def render_single_html(
       currentTime = scenario.meta.simulation_end_seconds;
       render();
       stop();
-      void advanceDate();
+
+      // 옵션이 체크되어 있을 때만 같은 방법의 다음 사용 가능 날짜를 자동 재생한다.
+      if (autoNextDateChk.checked) {{
+        void advanceDate();
+      }}
       return;
     }}
     render();
