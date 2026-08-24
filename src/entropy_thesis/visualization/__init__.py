@@ -6,6 +6,7 @@ python -m entropy_thesis.visualization.picking_animation --data-dir data/raw --l
 
 HTML 파일 & 서버 기동
 python -m entropy_thesis.visualization.picking_animation --data-dir data/raw --layout-svg data/raw_original/Layout_Z1.0.svg --output-html results/figures/picking_animation.html --html-only --serve
+python -m entropy_thesis.visualization.picking_animation --html-only --output-html results/figures/picking_animation.html --serve
 
 HTML 파일만 생성
 python -m entropy_thesis.visualization.picking_animation --data-dir data/raw --layout-svg data/raw_original/Layout_Z1.0.svg --output-html results/figures/picking_animation.html --html-only

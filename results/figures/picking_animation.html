@@ -12,8 +12,10 @@
   .visual-panel { min-width: 0; background: #fff; border-radius: 14px; box-shadow: 0 5px 22px rgba(15,23,42,.06); padding: 10px; }
   #svg-stack { position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: #fff; border-radius: 10px; }
   #svg-stack > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-  #overlay .marker circle { stroke: #fff; stroke-width: 2.2; }
-  #overlay .marker text { font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; }
+  #overlay .marker circle { stroke: #fff; stroke-width: 2.2; transition: fill .08s linear, stroke .08s linear, stroke-width .08s linear; }
+  #overlay .marker text { font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; transition: fill .08s linear; }
+  #overlay .marker.collision circle { fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }
+  #overlay .marker.collision text { fill: #fff; }
   .controls { display: grid; grid-template-columns: auto 76px 150px minmax(120px,1fr) 74px; gap: 9px; align-items: center; padding: 8px 0 0; }
   button, select { min-height: 38px; border: 1px solid #d6dce5; border-radius: 9px; background: #fff; color: #172033; padding: 7px 10px; font-size: 14px; }
   button { cursor: pointer; white-space: nowrap; }
@@ -38714,6 +38716,7 @@
         - 원형 마커는 작업자 현재 위치입니다.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
         - 월별 JSON을 필요할 때만 읽어 메모리 사용량을 줄입니다.<br />
+        - 두 피커가 근접하여 충돌로 판정되면 해당 마커가 빨간색으로 표시됩니다.<br />
         - 날짜가 끝나면 같은 방법으로 다음 사용 가능 날짜가 자동 재생됩니다.<br />
         - Entropy는 λ*=0.25를 사용합니다.
       </div>
@@ -38743,6 +38746,10 @@
   const statusBox = document.getElementById('statusBox');
   const allocationInfo = document.getElementById('allocationInfo');
   const dateCountBadge = document.getElementById('dateCountBadge');
+
+  // SVG 좌표 기준 충돌 판정 거리. 두 마커 중심이 이 값 이하로 가까우면
+  // 충돌로 표시한다. 둘 다 idle인 경우(예: I/O 지점 대기)는 제외한다.
+  const COLLISION_DISTANCE_PX = 10.0;
 
   dateCountBadge.textContent = `(${dates.length})`;
 
@@ -38861,7 +38868,6 @@
       const c = svgNode('circle'); c.setAttribute('r', '12'); c.setAttribute('fill', color);
       const t = svgNode('text'); t.textContent = shortWorkerLabel(worker.worker_id, index);
       g.appendChild(c); g.appendChild(t); overlay.appendChild(g);
-      markerMap.set(worker.worker_id, { g, c, t });
 
       const option = document.createElement('option');
       option.value = worker.worker_id; option.textContent = worker.worker_id; workerSel.appendChild(option);
@@ -38872,6 +38878,8 @@
         `<div class="worker-sub">move=${worker.movement_events}, pick=${worker.pick_events}</div></div>` +
         `<div class="distance">${worker.total_distance_m.toFixed(1)} m</div>`;
       workerList.appendChild(row);
+      const dot = row.querySelector('.dot');
+      markerMap.set(worker.worker_id, { g, c, t, dot, baseColor: color });
     });
     selectedWorker = 'ALL';
   }
@@ -38895,24 +38903,65 @@
     if (!scenario) return;
     slider.value = String(currentTime);
     timeLabel.textContent = formatSeconds(currentTime);
-    const states = [];
 
-    scenario.workers.forEach(worker => {
-      const marker = markerMap.get(worker.worker_id);
-      const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
-      marker.g.style.display = visible ? '' : 'none';
-      if (!visible) return;
+    // 먼저 모든 작업자의 현재 위치를 계산한다. 작업자 한 명만 화면에 표시하는
+    // 경우에도, 숨겨진 다른 작업자와의 충돌 여부는 정상적으로 계산된다.
+    const frameStates = scenario.workers.map(worker => {
       const seg = findSegment(worker, currentTime);
       const p = position(seg, currentTime);
+      return { worker, seg, p };
+    });
+
+    const collisionWorkers = new Set();
+    const collisionPairs = [];
+    const threshold2 = COLLISION_DISTANCE_PX * COLLISION_DISTANCE_PX;
+
+    for (let i = 0; i < frameStates.length; i++) {
+      const a = frameStates[i];
+      for (let j = i + 1; j < frameStates.length; j++) {
+        const b = frameStates[j];
+
+        // 출발/종료 I/O 등에서 대기 중인 작업자끼리 겹쳐 있는 것은
+        // 실제 이동 충돌로 보지 않는다.
+        if (a.seg.kind === 'idle' && b.seg.kind === 'idle') continue;
+
+        const dx = a.p.x - b.p.x;
+        const dy = a.p.y - b.p.y;
+        if ((dx * dx + dy * dy) <= threshold2) {
+          collisionWorkers.add(a.worker.worker_id);
+          collisionWorkers.add(b.worker.worker_id);
+          collisionPairs.push(`${a.worker.worker_id}↔${b.worker.worker_id}`);
+        }
+      }
+    }
+
+    const states = [];
+    frameStates.forEach(({ worker, seg, p }) => {
+      const marker = markerMap.get(worker.worker_id);
+      const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
+      const colliding = collisionWorkers.has(worker.worker_id);
+
+      marker.g.style.display = visible ? '' : 'none';
+      marker.g.classList.toggle('collision', colliding);
+      marker.c.setAttribute('fill', marker.baseColor);
+      if (marker.dot) marker.dot.style.background = colliding ? '#ef4444' : marker.baseColor;
+
       marker.c.setAttribute('cx', p.x.toFixed(3)); marker.c.setAttribute('cy', p.y.toFixed(3));
       marker.t.setAttribute('x', p.x.toFixed(3)); marker.t.setAttribute('y', p.y.toFixed(3));
       marker.g.setAttribute('opacity', seg.kind === 'idle' ? '0.68' : '1');
-      states.push(`${worker.worker_id}(${seg.kind})`);
+
+      if (visible) states.push(`${worker.worker_id}(${seg.kind}${colliding ? ', 충돌' : ''})`);
     });
+
+    const collisionText = collisionPairs.length
+      ? collisionPairs.slice(0, 5).join(', ') + (collisionPairs.length > 5 ? ' ...' : '')
+      : '없음';
 
     setStatus(`<strong>현재 시간</strong> : ${formatSeconds(currentTime)}<br>` +
       `<strong>표시 작업자</strong> : ${selectedWorker === 'ALL' ? '전체' : selectedWorker}<br>` +
       `<strong>활성 마커 수</strong> : ${states.length}<br>` +
+      `<strong>충돌 피커 수</strong> : ${collisionWorkers.size}명 · <strong>충돌 쌍</strong> : ${collisionPairs.length}<br>` +
+      `<strong>충돌</strong> : ${collisionText}<br>` +
       `<strong>상태</strong> : ${states.slice(0, 7).join(', ')}${states.length > 7 ? ' ...' : ''}`);
   }
 
