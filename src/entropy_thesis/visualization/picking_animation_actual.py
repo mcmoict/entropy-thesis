@@ -353,7 +353,6 @@ _WAIT_START_ATTRS: tuple[str, ...] = (
 _WAIT_END_ATTRS: tuple[str, ...] = (
     "wait_finished_at",
     "waiting_finished_at",
-    "entered_at",
     "acquired_at",
     "resource_acquired_at",
     "granted_at",
@@ -463,7 +462,7 @@ def _event_resource_info(
     event_kind: str | None,
 ) -> tuple[str, str | None, str | None]:
     resource_type = str(
-        _first_attr(event, ("resource_kind", "resource_type", "contention_type", "kind", "type"))
+        _first_attr(event, ("resource_type", "contention_type", "kind", "type"))
         or ("edge" if event_kind == "move" else "pick_node" if event_kind == "pick" else "resource")
     )
 
@@ -636,7 +635,7 @@ def _extract_actual_conflict_events(
             events.sort(key=lambda item: (item["t0"], item["t1"], item["worker_ids"]))
             print(
                 "[CONFLICT] Exact DES events extracted | "
-                f"source={source_name} | conflicts={len(events)} | summary_match=yes"
+                f"source={source_name} | conflicts={len(events)}"
             )
             return events
 
@@ -1345,6 +1344,20 @@ def render_single_html(
       (event.worker_ids || []).forEach(workerId => collisionWorkers.add(String(workerId)));
     }});
 
+    // 누적 충돌 이벤트: 재생 시작(0초)부터 현재 시각까지
+    // 실제 DES conflict event의 시작시각(t0)이 지난 이벤트 수.
+    const cumulativeConflictEvents = conflictEvents.filter(event =>
+      Number(event.t0) <= currentTime
+    );
+
+    // 누적 충돌 피커: 각 누적 충돌 이벤트에 포함된 worker_ids 수를 합산.
+    // 동일 피커가 여러 번 충돌하면 발생 횟수만큼 반복 누적한다.
+    const cumulativeConflictPickerCount = cumulativeConflictEvents.reduce(
+      (sum, event) =>
+        sum + (Array.isArray(event.worker_ids) ? event.worker_ids.length : 0),
+      0
+    );
+
     // 구버전 JSON에는 conflict_events가 없다. 이 경우 거리로 추정하지 않는다.
     const hasExactConflictEvents = Array.isArray(scenario.conflict_events);
 
@@ -1381,6 +1394,7 @@ def render_single_html(
       `<strong>활성 마커 수</strong> : ${{states.length}}<br>` +
       `<strong>DES Conflicts</strong> : ${{totalConflicts}}회 · <strong>총 대기</strong> : ${{totalWait.toFixed(2)}}초<br>` +
       `<strong>현재 충돌 이벤트</strong> : ${{activeConflictEvents.length}}개 · <strong>충돌 피커</strong> : ${{collisionWorkers.size}}명<br>` +
+      `<strong>누적 충돌 이벤트</strong> : ${{cumulativeConflictEvents.length}}개 · <strong>누적 충돌 피커</strong> : ${{cumulativeConflictPickerCount}}명<br>` +
       `<strong>현재 충돌</strong> : ${{conflictPreview}}<br>` +
       `<strong>이벤트 소스</strong> : ${{hasExactConflictEvents ? '실제 DES resource contention' : '구버전 JSON · 실제 이벤트 없음'}}<br>` +
       `<strong>상태</strong> : ${{states.slice(0, 7).join(', ')}}${{states.length > 7 ? ' ...' : ''}}`);
