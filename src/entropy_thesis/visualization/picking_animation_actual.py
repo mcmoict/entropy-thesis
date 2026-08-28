@@ -70,6 +70,7 @@ class SvgAxesTransform:
     y_offset: float
     calibration_points: int
     max_residual_px: float
+    zone_rectangles: tuple[dict[str, Any], ...]
 
     def raw_to_svg(self, raw_x: float, raw_y: float) -> tuple[float, float]:
         return (
@@ -118,6 +119,146 @@ def _extract_svg_support_markers(root: ET.Element) -> list[tuple[float, float]]:
             continue
         markers.append((float(x), float(y)))
     return markers
+
+
+def _support_point_code(point: Any) -> str | None:
+    """Best-effort extraction of a support-point code such as LC-08 / CC-08."""
+
+    candidates: list[Any] = []
+    for name in (
+        "point_id", "support_point_id", "support_id", "location_id",
+        "code", "name", "id", "point", "location",
+    ):
+        try:
+            value = getattr(point, name)
+        except Exception:
+            continue
+        if value is not None:
+            candidates.append(value)
+
+    # Dataclass / namedtuple implementations can vary between dataset revisions.
+    # Also inspect public attribute values and finally repr/str as a safe fallback.
+    try:
+        values = vars(point)
+    except TypeError:
+        values = {}
+    if isinstance(values, dict):
+        candidates.extend(values.values())
+    candidates.extend((str(point), repr(point)))
+
+    for value in candidates:
+        match = re.search(r"\b(?:LC|RC|CC)-\d{2}\b", str(value), flags=re.IGNORECASE)
+        if match:
+            return match.group(0).upper()
+    return None
+
+
+def _build_macro_zone_rectangles(
+    *,
+    support_points: Iterable[Any],
+    svg_markers: Iterable[tuple[float, float]],
+) -> tuple[dict[str, Any], ...]:
+    """Build Z01~Z04 rectangles from the model's LC/RC 08~17 anchors.
+
+    Macro-zone definition used by Phase 3/4:
+      Z01 = LC-08~LC-12 (Left / Near)
+      Z02 = LC-13~LC-17 (Left / Far)
+      Z03 = RC-08~RC-12 (Right / Near)
+      Z04 = RC-13~RC-17 (Right / Far)
+
+    The left/right split follows CC-08. The near/far boundary is the midpoint
+    between the 12 and 13 anchor rows. Outer Y boundaries are extrapolated by
+    half an anchor interval so the rectangles cover the full 08~17 zone cells.
+    """
+
+    supports = tuple(support_points)
+    markers = tuple(svg_markers)
+    if len(supports) != len(markers):
+        return ()
+
+    by_code: dict[str, tuple[float, float]] = {}
+    for point, marker in zip(supports, markers):
+        code = _support_point_code(point)
+        if code:
+            by_code[code] = (float(marker[0]), float(marker[1]))
+
+    required = [
+        *(f"LC-{i:02d}" for i in range(8, 18)),
+        *(f"RC-{i:02d}" for i in range(8, 18)),
+        "CC-08",
+    ]
+    missing = [code for code in required if code not in by_code]
+    if missing:
+        print(
+            "[ZONE ] Macro-zone rectangles unavailable; support ids not resolved: "
+            + ", ".join(missing[:8])
+            + (" ..." if len(missing) > 8 else "")
+        )
+        return ()
+
+    lc = [by_code[f"LC-{i:02d}"] for i in range(8, 18)]
+    rc = [by_code[f"RC-{i:02d}"] for i in range(8, 18)]
+
+    # The SVG can have an inverted Y axis, so derive boundaries numerically from
+    # marker positions instead of assuming that larger raw Y means lower screen Y.
+    row_y = [0.5 * (lc[i][1] + rc[i][1]) for i in range(10)]
+    near_mid_y = 0.5 * (row_y[4] + row_y[5])  # between 12 and 13
+    first_step = row_y[1] - row_y[0]
+    last_step = row_y[-1] - row_y[-2]
+    outer_08_y = row_y[0] - first_step / 2.0
+    outer_17_y = row_y[-1] + last_step / 2.0
+
+    # CC-08 is the model's left/right discriminator. Use the support-marker cloud
+    # for the warehouse-visible horizontal extent, with a small half-spacing pad.
+    split_x = by_code["CC-08"][0]
+    all_x = sorted(float(x) for x, _ in markers)
+    x_min = all_x[0]
+    x_max = all_x[-1]
+    if len(all_x) >= 2:
+        diffs = [b - a for a, b in zip(all_x, all_x[1:]) if b - a > 1e-6]
+        x_pad = (min(diffs) / 2.0) if diffs else 0.0
+    else:
+        x_pad = 0.0
+    left_x = x_min - x_pad
+    right_x = x_max + x_pad
+
+    def rect(
+        zone_id: str,
+        label: str,
+        x0: float,
+        x1: float,
+        y0: float,
+        y1: float,
+    ) -> dict[str, Any]:
+        left, right = sorted((float(x0), float(x1)))
+        top, bottom = sorted((float(y0), float(y1)))
+        return {
+            "zone_id": zone_id,
+            "label": label,
+            "x": round(left, 3),
+            "y": round(top, 3),
+            "width": round(right - left, 3),
+            "height": round(bottom - top, 3),
+        }
+
+    # Near/Far is determined by support anchor numbers, not by screen direction.
+    near_y0, near_y1 = outer_08_y, near_mid_y
+    far_y0, far_y1 = near_mid_y, outer_17_y
+    zones = (
+        rect("Z01", "Z01 · Left / Near", left_x, split_x, near_y0, near_y1),
+        rect("Z02", "Z02 · Left / Far", left_x, split_x, far_y0, far_y1),
+        rect("Z03", "Z03 · Right / Near", split_x, right_x, near_y0, near_y1),
+        rect("Z04", "Z04 · Right / Far", split_x, right_x, far_y0, far_y1),
+    )
+    print(
+        "[ZONE ] Macro-zone rectangles calibrated | "
+        + " | ".join(
+            f"{item['zone_id']}=({item['x']:.1f},{item['y']:.1f},"
+            f"{item['width']:.1f}x{item['height']:.1f})"
+            for item in zones
+        )
+    )
+    return zones
 
 
 def parse_svg_axes_transform(
@@ -170,6 +311,10 @@ def parse_svg_axes_transform(
     x_scale, x_offset, x_residual = _fit_linear(raw_x, svg_x)
     y_scale, y_offset, y_residual = _fit_linear(raw_y, svg_y)
     max_residual = max(x_residual, y_residual)
+    zone_rectangles = _build_macro_zone_rectangles(
+        support_points=supports,
+        svg_markers=markers,
+    )
 
     # If point ordering no longer matches the supplied SVG, the regression error
     # immediately exposes it instead of silently producing a misleading animation.
@@ -197,6 +342,7 @@ def parse_svg_axes_transform(
         y_offset=y_offset,
         calibration_points=len(supports),
         max_residual_px=max_residual,
+        zone_rectangles=zone_rectangles,
     )
 
 
@@ -1141,6 +1287,9 @@ def render_single_html(
 
     manifest_json = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
     data_dir_json = json.dumps(data_dir_name, ensure_ascii=False)
+    zone_rectangles_json = json.dumps(
+        svg_transform.zone_rectangles, ensure_ascii=False, separators=(",", ":")
+    )
     method_options = "\n".join(
         f'<option value="{method}">{METHOD_LABELS[method]}</option>' for method in METHODS
     )
@@ -1163,6 +1312,17 @@ def render_single_html(
   #overlay .marker text {{ font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; transition: fill .08s linear; }}
   #overlay .marker.collision circle {{ fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }}
   #overlay .marker.collision text {{ fill: #fff; }}
+  #overlay .zone-rect {{ pointer-events: none; }}
+  #overlay .zone-rect rect {{ fill-opacity: .055; stroke-width: 2.1; stroke-dasharray: 8 5; vector-effect: non-scaling-stroke; }}
+  #overlay .zone-rect text {{ font-size: 15px; font-weight: 800; paint-order: stroke; stroke: rgba(255,255,255,.92); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }}
+  #overlay .zone-z01 rect {{ fill: #2563eb; stroke: #2563eb; }}
+  #overlay .zone-z01 text {{ fill: #1d4ed8; }}
+  #overlay .zone-z02 rect {{ fill: #7c3aed; stroke: #7c3aed; }}
+  #overlay .zone-z02 text {{ fill: #6d28d9; }}
+  #overlay .zone-z03 rect {{ fill: #059669; stroke: #059669; }}
+  #overlay .zone-z03 text {{ fill: #047857; }}
+  #overlay .zone-z04 rect {{ fill: #db2777; stroke: #db2777; }}
+  #overlay .zone-z04 text {{ fill: #be185d; }}
   #overlay .pick-target circle {{ fill: #f59e0b; fill-opacity: .34; stroke: #b45309; stroke-width: 1.5; }}
   #overlay .pick-target text {{ font-size: 8px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #78350f; pointer-events: none; }}
   #overlay .pick-target {{ pointer-events: auto; }}
@@ -1237,6 +1397,10 @@ def render_single_html(
           <input id="pickTargetsChk" type="checkbox" checked />
           <span>피킹 대상 표시</span>
         </label>
+        <label class="play-option-label" for="zonesChk">
+          <input id="zonesChk" type="checkbox" checked />
+          <span>Z01~Z04 구역 표시</span>
+        </label>
       </div>
     </main>
 
@@ -1254,6 +1418,7 @@ def render_single_html(
       <div class="notes">
         - 큰 원형 마커는 작업자 현재 위치입니다.<br />
         - 주황색 반투명 포인트는 당일 Picking_Wave의 피킹 대상 위치입니다. 숫자는 동일 포인트의 피킹 이벤트 수입니다.<br />
+        - 점선 사각형은 인력배치 Macro-zone입니다: Z01=Left/Near, Z02=Left/Far, Z03=Right/Near, Z04=Right/Far.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
         - 논문의 Conflicts와 동일한 DES resource contention 대기 구간에만 해당 피커가 빨간색으로 표시됩니다.<br />
         - '다음 날짜 자동실행' 체크 시 날짜가 끝나면 같은 방법의 다음 사용 가능 날짜를 자동 재생합니다.<br />
@@ -1269,6 +1434,7 @@ def render_single_html(
 (() => {{
   const manifest = JSON.parse(document.getElementById('animationManifest').textContent);
   const dataDir = {data_dir_json};
+  const macroZones = {zone_rectangles_json};
   const dates = manifest.date_order;
   const monthByDate = manifest.month_by_date;
   const monthFiles = manifest.month_files;
@@ -1282,6 +1448,7 @@ def render_single_html(
   const playBtn = document.getElementById('playBtn');
   const autoNextDateChk = document.getElementById('autoNextDateChk');
   const pickTargetsChk = document.getElementById('pickTargetsChk');
+  const zonesChk = document.getElementById('zonesChk');
   const slider = document.getElementById('timeSlider');
   const timeLabel = document.getElementById('timeLabel');
   const workerList = document.getElementById('workerList');
@@ -1322,6 +1489,7 @@ def render_single_html(
   let selectedWorker = 'ALL';
   let markerMap = new Map();
   let workerIndices = new Map();
+  let zoneLayer = null;
   let pickTargetLayer = null;
   let currentPickTargets = [];
   let loadedMonthKey = null;
@@ -1464,12 +1632,47 @@ def render_single_html(
     return Array.from(byPoint.values());
   }}
 
+  function rebuildZoneLayer() {{
+    zoneLayer = svgNode('g');
+    zoneLayer.setAttribute('id', 'macro-zone-layer');
+    overlay.appendChild(zoneLayer);
+
+    (macroZones || []).forEach(zone => {{
+      const g = svgNode('g');
+      g.setAttribute('class', `zone-rect zone-${{String(zone.zone_id || '').toLowerCase()}}`);
+
+      const rect = svgNode('rect');
+      rect.setAttribute('x', Number(zone.x).toFixed(3));
+      rect.setAttribute('y', Number(zone.y).toFixed(3));
+      rect.setAttribute('width', Number(zone.width).toFixed(3));
+      rect.setAttribute('height', Number(zone.height).toFixed(3));
+      rect.setAttribute('rx', '3');
+      rect.setAttribute('ry', '3');
+      g.appendChild(rect);
+
+      const text = svgNode('text');
+      text.setAttribute('x', (Number(zone.x) + 8).toFixed(3));
+      text.setAttribute('y', (Number(zone.y) + 19).toFixed(3));
+      text.textContent = String(zone.zone_id || '');
+      g.appendChild(text);
+
+      const title = svgNode('title');
+      title.textContent = String(zone.label || zone.zone_id || 'Macro zone');
+      g.appendChild(title);
+      zoneLayer.appendChild(g);
+    }});
+    zoneLayer.style.display = zonesChk.checked ? '' : 'none';
+  }}
+
   function rebuildWorkers() {{
     overlay.innerHTML = '';
     workerSel.innerHTML = '<option value="ALL">전체 작업자</option>';
     workerList.innerHTML = '';
     markerMap = new Map();
     workerIndices = new Map();
+
+    // Macro-zone -> 피킹 대상 -> 작업자 순으로 그려 구역선이 가장 뒤에 놓인다.
+    rebuildZoneLayer();
 
     // 피킹 대상은 작업자 마커보다 먼저 그려 항상 배경 레이어에 놓는다.
     pickTargetLayer = svgNode('g');
@@ -1753,6 +1956,9 @@ def render_single_html(
   workerSel.addEventListener('change', e => {{ selectedWorker = e.target.value; render(); }});
   pickTargetsChk.addEventListener('change', () => {{
     if (pickTargetLayer) pickTargetLayer.style.display = pickTargetsChk.checked ? '' : 'none';
+  }});
+  zonesChk.addEventListener('change', () => {{
+    if (zoneLayer) zoneLayer.style.display = zonesChk.checked ? '' : 'none';
   }});
   slider.addEventListener('input', e => {{
     hasStarted = true;
