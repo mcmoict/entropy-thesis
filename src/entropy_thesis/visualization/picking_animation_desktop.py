@@ -353,8 +353,27 @@ def _build_macro_zone_rectangles(
     all_x = sorted(float(x) for x, _ in markers)
     diffs = [b - a for a, b in zip(all_x, all_x[1:]) if b - a > 1e-6]
     x_pad = min(diffs) / 2.0 if diffs else 0.0
-    left_x = all_x[0] - x_pad
-    right_x = all_x[-1] + x_pad
+
+    # Macro-zone의 중앙 분할선(CC-08)은 그대로 유지하고, 화면 바깥쪽 경계만
+    # 안쪽으로 줄인다. 기존 영역은 support-marker cloud의 전체 폭을 사용해
+    # 좌/우 여백까지 크게 포함했는데, Desktop 시각화에서는 실제 작업 구역에
+    # 좀 더 밀착되도록 축소한다.
+    #
+    #   horizontal 23% : 좌/우 외곽을 각 half-zone 폭의 23%만큼 안쪽으로
+    #   vertical    6% : 위/아래 외곽을 각 half-zone 높이의 6%만큼 안쪽으로
+    #
+    # 필요하면 아래 두 비율만 조정하면 Macro-zone 크기를 쉽게 변경할 수 있다.
+    MACRO_ZONE_HORIZONTAL_INSET_RATIO = 0.23
+    MACRO_ZONE_VERTICAL_INSET_RATIO = 0.06
+
+    original_left_x = all_x[0] - x_pad
+    original_right_x = all_x[-1] + x_pad
+    left_x = original_left_x + (split_x - original_left_x) * MACRO_ZONE_HORIZONTAL_INSET_RATIO
+    right_x = original_right_x + (split_x - original_right_x) * MACRO_ZONE_HORIZONTAL_INSET_RATIO
+
+    # 08/17 쪽 외곽 Y만 중앙 경계 쪽으로 당긴다. near/far 경계는 유지한다.
+    outer_08_y = outer_08_y + (near_mid_y - outer_08_y) * MACRO_ZONE_VERTICAL_INSET_RATIO
+    outer_17_y = outer_17_y + (near_mid_y - outer_17_y) * MACRO_ZONE_VERTICAL_INSET_RATIO
 
     def rect(zone_id: str, label: str, x0: float, x1: float, y0: float, y1: float) -> dict[str, Any]:
         left, right = sorted((float(x0), float(x1)))
@@ -396,7 +415,7 @@ def build_macro_zones(svg_path: Path, support_csv: Path) -> tuple[dict[str, Any]
 
     zones = _build_macro_zone_rectangles(support_points=supports, svg_markers=markers)
     if zones:
-        print("[ZONE ] Z01~Z04 calibrated from SVG support markers")
+        print("[ZONE ] Z01~Z04 calibrated from SVG support markers | outer bounds reduced (H=23%, V=6%)")
     return zones
 
 
