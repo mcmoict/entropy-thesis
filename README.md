@@ -1,243 +1,591 @@
-# Entropy Thesis
+# Entropy-Based Picking Workforce Allocation Optimization
 
-Shannon entropy로 물류센터 피킹 작업자의 공간적 집중과 혼잡을 측정하고,
-네 가지 작업자 배치 방식을 이산 사건 시뮬레이션으로 비교하는 석사 논문 연구 프로젝트입니다.
+실제 물류센터 피킹 데이터를 기반으로 **Shannon Entropy**와 **이산 사건 시뮬레이션(Discrete-Event Simulation, DES)** 을 결합하여, 작업자 배치에 따른 **처리효율과 혼잡의 trade-off**를 분석하는 석사 논문 연구 프로젝트입니다.
 
-## 실제 데이터 연구 모델 (Phase 1~6)
+본 프로젝트의 실제 데이터 연구는 **Phase 1 ~ Phase 6**으로 구성되며, 최종 제안 방법은 20개 demand micro-zone의 수요 집중도를 이용해 4개 workforce macro-zone의 **정수 작업자 배치**를 최적화합니다.
 
-- 원본 CAD 좌표 단위: **inch**, `1 inch = 0.0254 m`
-- 모든 picker의 단일 출발/종료 depot: **CC-08**
-- 수요 공간: **20 micro-zones** = LC-08~17 + RC-08~17
-- 인력 배치 공간: **4 macro-zones** = Left/Right × Near/Far
-- Phase 3 비교: Observed Baseline / Random / Equal / Volume Proportional
-- Phase 4 제안법: 가능한 **정수 작업자 배치**를 직접 평가하는 entropy-aware objective
+---
+
+## 1. 연구 목적
+
+물동량 비례(Volume Proportional) 배치는 수요량에 따라 인력을 배치하므로 처리효율 측면에서는 유리할 수 있지만, 특정 공간에 작업자가 동시에 집중되어 통로 및 피킹 지점의 혼잡이 증가할 수 있습니다.
+
+본 연구의 핵심 질문은 다음과 같습니다.
+
+> **수요량뿐 아니라 수요의 공간적 집중도까지 고려하여 작업자를 배치하면, 처리효율의 과도한 손실 없이 혼잡을 줄일 수 있는가?**
+
+이를 검증하기 위해 동일한 실제 피킹 데이터와 DES 환경에서 다음 방법을 비교합니다.
+
+```text
+Observed Baseline
+Random
+Equal
+Volume Proportional
+Entropy-based
+```
+
+---
+
+## 2. Phase 1 ~ Phase 6
+
+| Phase | 내용 | 핵심 목적 |
+|---|---|---|
+| **Phase 1** | 실제 데이터 로딩 및 Warehouse Graph 구축 | 좌표·피킹 데이터 검증 및 물리 네트워크 생성 |
+| **Phase 2** | Observed Baseline DES | 실제 작업자 배정과 피킹 순서를 이용한 기준 시뮬레이션 |
+| **Phase 3** | 기존 배치 방법 비교 | Random / Equal / Volume Proportional 비교 |
+| **Phase 4** | Entropy 기반 정수 작업자 배치 | 목적함수 정의 및 Pareto-knee 기반 λ Calibration |
+| **Phase 5** | Frozen Holdout 검증 | Calibration에서 고정한 λ*를 독립 Holdout에 적용 |
+| **Phase 6** | Trade-off / Mechanism / Robustness | 일반화 성능, 배치 변경 메커니즘, 통계적 강건성 분석 |
+
+전체 흐름:
+
+```text
+Raw Warehouse Data
+        ↓
+Phase 1  Data Validation / Navigation Graph
+        ↓
+Phase 2  Observed Baseline DES
+        ↓
+Phase 3  Random / Equal / Volume Comparison
+        ↓
+Phase 4  Entropy Integer Allocation + λ Calibration
+        ↓
+Phase 5  Frozen Holdout Validation
+        ↓
+Phase 6  Trade-off / Mechanism / Robustness Analysis
+        ↓
+Visualization (HTML / Desktop / EXE)
+```
+
+---
+
+## 3. 최종 연구 모델
+
+### 3.1 물리 모델
+
+- 원본 CAD 좌표 단위: **inch**
+- 거리 변환: `1 inch = 0.0254 m`
+- 모든 picker의 공통 시작/종료 지점: **CC-08**
+- 기본 I/O node: `SUP:CC-08`
+- CC-08 좌표: 약 `(10.2362, 16.0274) m`
+- `Picking_Wave.csv`의 원래 pick sequence를 보존
+- 좌표가 정의되지 않은 picking location은 임의 생성하지 않고 unresolved로 처리
+
+### 3.2 Demand Micro-zone: 20개
+
+```text
+M01 ~ M10 : LC-08 ~ LC-17
+M11 ~ M20 : RC-08 ~ RC-17
+```
+
+20개 micro-zone은 각 macro-zone 내부의 **수요 공간 집중도**를 계산하는 데 사용합니다.
+
+### 3.3 Workforce Macro-zone: 4개
+
+```text
+Z01 : LC-08 ~ LC-12  = Left / Near
+Z02 : LC-13 ~ LC-17  = Left / Far
+Z03 : RC-08 ~ RC-12  = Right / Near
+Z04 : RC-13 ~ RC-17  = Right / Far
+```
+
+작업자 배치는 4개 macro-zone 단위로 결정합니다.
+
+Picking list 자체를 여러 zone으로 분할하지는 않습니다. 각 list는 pick task가 가장 많은 **dominant macro-zone**의 workload pool에 귀속되지만, 실제 DES 이동 중에는 작업자가 다른 macro-zone을 통과하거나 그곳에서 피킹할 수 있습니다.
+
+---
+
+## 4. Entropy 기반 정수 작업자 배치
+
+Macro-zone `z`의 workload를 `V_z`, 전체 작업자 수를 `N`, zone별 정수 작업자 수를 `n_z`라 정의합니다.
 
 ```text
 d_z = V_z / ΣV_z
 p_z = n_z / N
+```
+
+수요 비중과 작업자 비중의 불일치:
+
+```text
 D(n) = 0.5 × Σ |p_z - d_z|
-R(n) = Σ (1 - H_z) × C(n_z, 2)
-J(n; lambda) = D(n) + lambda × R(n)
 ```
 
-`lambda=0`이면 Phase 3의 Volume Proportional 정수 배치를 정확한 control로 사용한다. λ가 증가하면 수요 적합도 `D`와 집중 zone의 동시 작업자 쌍 위험 `R` 사이의 trade-off에 따라 작업자 1명의 실제 zone 이동이 발생할 수 있다. 최적 λ*는 Calibration 날짜에서 선택하고 Phase 5의 Frozen Holdout에서는 재보정하지 않는다.
+각 macro-zone 내부 5개 micro-zone의 normalized Shannon entropy를 `H_z`라 할 때:
 
-> `entropy_thesis.allocation.entropy_based_allocation`에는 초기 합성실험용 entropy-regularization 함수가 남아 있지만, **실제 데이터 Phase 4/5의 제안 방법은 위 정수 목적함수**를 사용한다.
-
-상세 개정 내역과 `2023-01-05` PRE-DES/DES 검증값은 `PHASE4_INTEGER_OBJECTIVE_20260823.md`를 참조한다.
-
-## 환경 구성
-
-Python 3.13이 필요합니다. 프로젝트 메타데이터와 런타임 의존성의 기준 파일은
-`pyproject.toml`입니다.
-
-## 환경 맞추기(파이썬 버전 3.13 관련 오류 발생시 실행)
-
-```bash
-conda deactivate
-conda env remove -n thesis-env
-conda create -n thesis-env python=3.13 -y
-conda activate thesis-env
-python -m pip install -e .
+```text
+C_z = 1 - H_z
 ```
 
-### venv와 pip
+수요 집중도를 반영한 동시 작업자 위험:
 
-```bash
-python -m venv .venv
+```text
+R(n) = Σ C_z × C(n_z, 2)
 ```
+
+최종 목적함수:
+
+```text
+J(n; λ) = D(n) + λR(n)
+```
+
+- `D(n)`: workload 비중과 작업자 비중의 불일치
+- `R(n)`: 집중된 zone에 여러 작업자가 동시에 배치되는 위험
+- `λ = 0`: **Volume Proportional 정수 배치와 동일한 control**
+- `λ > 0`: workload 적합도를 일부 양보하면서 집중 zone의 작업자 중첩 위험 감소 가능
+
+가능한 정수 worker vector `[n1, n2, n3, n4]`를 직접 평가하여 `J(n;λ)`가 최소인 배치를 선택합니다.
+
+---
+
+## 5. 데이터 및 실험 조건
+
+현재 최종 모델 기준 주요 데이터 규모:
+
+| 항목 | 값 |
+|---|---:|
+| Storage Locations | 2,292 |
+| Support Points | 44 |
+| Products | 208 |
+| Customer Order Lines | 122,370 |
+| Picking Tasks | 215,192 |
+| `(wave, operator)` Picking Lists | 9,796 |
+| 전체 데이터의 Operators | 22 |
+| Navigation Graph Nodes / Edges | 510 / 534 |
+| Connected Components | 1 |
+| Resolved Picking Tasks | 191,583 (89.03%) |
+| Fully-valid Picking Lists | 7,402 / 9,796 |
+
+Phase 4 실험 날짜:
+
+```text
+Operating dates : 176
+Eligible dates  : 132
+Calibration     : 92 dates
+Frozen Holdout  : 40 dates
+Split strategy  : chronological 70 / 30
+```
+
+각 운영일의 비교 방법에는 해당 날짜에서 실제 관측된 operator 수를 기본 총 작업자 수로 사용합니다.
+
+---
+
+## 6. 최종 실험 결과
+
+### 6.1 Phase 4 - λ Calibration
+
+λ 후보:
+
+```text
+0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8
+```
+
+Calibration 92일에서 Mean Flow Time과 `Conflicts / Wait / Congestion Ratio`를 함께 평가한 Pareto frontier의 knee point:
+
+```text
+Selected λ* = 0.25
+```
+
+`λ=0`(Volume control) 대비 Calibration 평균:
+
+| KPI | 변화 |
+|---|---:|
+| Mean Flow Time | **+4.82%** |
+| Conflicts | **−11.40%** |
+| Congestion Wait | **−22.66%** |
+| Congestion Ratio | **−14.57%** |
+| Composite Congestion | **−16.21%** |
+
+### 6.2 Phase 5 - Frozen Holdout 40일
+
+| Method | Mean Flow Time (s) | Conflicts | Wait (s) | Congestion |
+|---|---:|---:|---:|---:|
+| Observed Baseline | 794.82 | 103.38 | 180.97 | 5.04% |
+| Random | 762.64 | 138.98 | 304.60 | 7.33% |
+| Equal | 858.62 | 116.05 | 244.60 | 6.30% |
+| Volume Proportional | **680.61** | 155.48 | 345.34 | 8.48% |
+| Entropy-based (λ*=0.25) | 699.91 | 148.48 | 306.27 | 7.99% |
+
+Entropy vs Volume:
+
+| KPI | Holdout 결과 |
+|---|---:|
+| Mean Flow Time cost | **+2.84%** |
+| Conflicts reduction | **4.50%** |
+| Wait reduction | **11.31%** |
+| Congestion Ratio reduction | **5.85%** |
+| Composite Congestion reduction | **7.22%** |
+
+Calibration과 Holdout 모두 **“효율 손실 + 혼잡 감소”**라는 동일한 Pareto trade-off 방향을 보였습니다.
+
+### 6.3 Phase 6 - 메커니즘 및 통계
+
+```text
+Same as Volume : 32 / 40 dates
+Changed        :  8 / 40 dates
+```
+
+Entropy와 Volume의 정수 작업자 배치가 달라진 8일 모두에서 작업자가 상대적으로 **높은 수요 집중도 zone에서 낮은 집중도 zone 방향으로 이동**했고, 이 중 6일에서는 실제 DES composite congestion도 개선되었습니다.
+
+전체 Holdout 40일 paired 통계:
+
+| KPI | 평균 개선 방향 | Wilcoxon p | Holm p |
+|---|---:|---:|---:|
+| Mean Flow Time | −2.84% | 0.0173 | 0.0692 |
+| Conflicts | +4.50% | 0.0929 | 0.2787 |
+| Wait | +11.31% | 0.1235 | 0.2787 |
+| Congestion Ratio | +5.85% | 0.2076 | 0.2787 |
+
+따라서 본 연구는 **Entropy가 Volume보다 모든 KPI에서 우월하다**고 주장하지 않습니다. 최종 결과는 수요 집중도를 목적함수에 포함함으로써 일부 운영일의 실제 정수 인력배치를 변경하고, **처리효율과 혼잡 사이의 대안적 Pareto 배치 정책을 구성할 수 있음**을 보여주는 것으로 해석합니다.
+
+---
+
+## 7. 개발 환경
+
+### Python
+
+```text
+Python >= 3.13
+```
+
+### 권장 Conda 환경
 
 Windows PowerShell:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+conda deactivate
+conda env remove -n thesis-env
+conda create -n thesis-env python=3.13 -y
+conda activate thesis-env
 python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+개발·테스트·Notebook 환경까지 사용할 경우:
+
+```powershell
 python -m pip install -e ".[dev,notebook]"
+python -m pip install networkx
 ```
 
-Linux 또는 macOS:
+설치 확인:
 
-```bash
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev,notebook]"
+```powershell
+python --version
+python -c "import pandas, networkx, simpy, scipy; print('OK')"
 ```
 
-런타임 패키지만 필요하면 `python -m pip install -r requirements.txt`를 사용합니다.
-검증 환경의 직접 의존성 버전까지 맞추려면 다음 명령을 사용합니다.
+---
 
-```bash
-python -m pip install -r requirements-lock.txt
-```
+## 8. Phase 실행 방법
 
-### Conda
+프로젝트 루트에서 실행합니다.
 
-```bash
-conda env create -f environment.yml
-conda activate entropy-thesis
-```
+### Phase 1 - 데이터 / Warehouse Graph 검증
 
-`environment-full.yml`은 검증한 직접 의존성 버전을 고정한 휴대 가능한 스냅숏입니다.
-`requirements-pip.txt`는 `requirements-lock.txt`를 가리키는 호환 파일입니다. 두 파일
-모두 로컬 절대 경로나 운영체제별 빌드 번호를 포함하지 않습니다. 운영체제별 전이
-의존성은 설치 시 해당 패키지 인덱스에서 해석됩니다.
-
-## 실험 실행
-
-기본 설정으로 네 가지 배치 전략을 실행합니다.
-
-```bash
-entropy-thesis --config configs/baseline.yaml
-# 또는
-python -m entropy_thesis --config configs/baseline.yaml
-```
-
-같은 `experiment.seed`와 설정을 사용하면 동일한 난수 조건으로 실험을 재현할 수 있습니다.
-결과는 기본적으로 `results/`에 저장됩니다.
-
-- `experiment_runs.csv`: 전략·반복별 창고 전체 지표
-- `experiment_zones.csv`: 전략·반복·구역별 지표
-- `experiment_summary.csv`: 전략별 평균과 표본 표준편차
-- `experiment_metadata.json`: 설정, 엔트로피 목적함수, 측정 모집단 정의
-
-## 기본 설정
-
-`configs/baseline.yaml`의 주요 항목은 다음과 같습니다.
-
-- `experiment`: 난수 seed와 반복 횟수
-- `warehouse`: 전체 작업자 수와 구역별 물량 비중·서비스율
-- `simulation`: 실행 시간, 워밍업 시간, 전체 도착률
-- `allocation`: 비교 전략과 엔트로피 배치 파라미터
-- `output`: 결과 저장 디렉터리
-
-`arrival_rate`는 시뮬레이션 시간 단위당 도착 작업 수이고, 각 구역의 `service_rate`는
-작업자 한 명이 시간 단위당 처리하는 작업 수입니다. 모든 구역의 `volume_share` 합은
-1이어야 하며 `warm_up`은 `duration`보다 작아야 합니다. 같은 구조의 JSON Schema는
-`data/schema.json`에서 확인할 수 있습니다. 알 수 없는 설정 키는 오타로 간주해 실행 전에
-거부하며, 개별 구역의 수요 비중과 전체 도착률은 0일 수 있습니다.
-
-## 시뮬레이션과 측정 정의
-
-각 구역은 독립적인 `M/M/c` 대기열입니다. 전체 작업은 Poisson 과정으로 도착하고
-`volume_share`에 따라 구역으로 나뉘며, 서비스 시간은 구역별 `service_rate`를 모수로 한
-지수분포를 따릅니다. 한 반복 안에서는 모든 전략이 동일한 도착·서비스 난수 흐름을
-사용하는 common random numbers 방식으로 비교됩니다. 무작위 배치용 난수 흐름은
-시뮬레이션 흐름과 분리됩니다.
-
-관측 구간은 `[warm_up, duration)`입니다.
-
-- `observation_arrivals`, `observation_completions`: 관측 구간의 도착·완료 사건 수
-- `throughput`: 모든 관측 구간 완료 수를 관측 시간으로 나눈 값. warm-up backlog 완료도 포함
-- `cohort_*`: 관측 구간에 도착한 작업 cohort 기준 지표
-- `cohort_service_level`: cohort 중 종료 시각 전 완료된 비율
-- `cohort_*_wait`, `cohort_*_system_time`: 종료 전 완료된 cohort만의 조건부 통계
-- `wip_start`, `wip_end`: 관측 시작·종료 시 대기 또는 처리 중인 작업 수
-- `queue_length_end`: 종료 시 처리 중인 작업을 제외한 대기 작업 수
-- `utilization`: 관측 구간의 busy worker-time / available worker-time
-
-완료되지 않은 cohort 작업은 우측 검열됩니다. 따라서 대기·체류시간 통계는 반드시
-`cohort_service_level`과 함께 해석해야 합니다. 표본이 없는 서비스 수준과 도착·완료
-엔트로피는 `NaN`으로 기록됩니다. 각 구역에는 다음 흐름 보존식이 적용됩니다.
-
-```text
-wip_end = wip_start + observation_arrivals - observation_completions
-```
-
-## 부하 시나리오
-
-세 설정은 구역별 서비스율을 동일하게 두어 배치 효과와 생산성 차이를 분리합니다.
-
-- `configs/low_load.yaml`: 낮은 부하, `arrival_rate=1.0`
-- `configs/baseline.yaml`: near-capacity 기준선, `arrival_rate=2.7`
-- `configs/overload.yaml`: 과부하, `arrival_rate=3.3`
-
-```bash
-entropy-thesis --config configs/low_load.yaml
-entropy-thesis --config configs/baseline.yaml
-entropy-thesis --config configs/overload.yaml
-```
-
-엔트로피 민감도 분석은 같은 시나리오에서 `entropy_weight`만 바꿔 별도 출력 디렉터리로
-실행합니다. 설정과 seed가 같으면 결과가 동일합니다.
-
-## 실제 데이터 Phase 1 / Phase 2 / Phase 3 / Phase 4 / Phase 5 / Phase 6
-
-실제 CSV 기반 창고 graph 검증은 다음 명령으로 실행합니다.
-
-```bash
+```powershell
 python -m entropy_thesis.simulation.phase1 --data-dir data/raw
 ```
 
-Phase 2의 실제 picking schedule 기반 이동거리·혼잡·공간 엔트로피 계산은 다음과 같습니다.
+### 테스트
 
-```bash
+```powershell
+python -m pytest
+```
+
+### Phase 2 - Observed Baseline DES
+
+```powershell
 python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
 ```
 
-Phase 3의 실제 데이터 기반 Random / Equal / Volume Proportional 작업자 배치 비교는 다음과 같습니다.
+### Phase 3 - Random / Equal / Volume 비교
 
-```bash
+```powershell
 python -m entropy_thesis.simulation.phase3 --data-dir data/raw --date 2023-01-05
 ```
 
-Phase 4는 전체 적합 날짜를 Calibration / Holdout으로 분리한 뒤 Calibration 날짜 전체에서 Entropy-based Allocation λ를 탐색합니다.
+### Phase 4 - Entropy λ Calibration
 
-```bash
+```powershell
 python -m entropy_thesis.simulation.phase4 --data-dir data/raw
 ```
 
-기본 λ 후보는 `0, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 2, 4, 8`입니다. 기본 분할은 날짜 단위 chronological 70% Calibration / 30% Holdout이며, 동일 날짜에서 같은 정수 작업자 배치를 만드는 λ는 DES를 한 번만 실행합니다. λ*는 `mean_flow_time_seconds`와 `Conflicts / Wait / Congestion Ratio`의 Calibration 평균으로 구성한 Pareto frontier에서 knee point를 선택하며, λ=0 대비 paired Wilcoxon 통계는 별도로 보고합니다.
+최종 λ*와 Calibration/Holdout 날짜는 다음 파일에 저장됩니다.
 
-Phase 5의 out-of-sample 검증은 다음과 같습니다. Phase 4에서 선택한 λ*와 Holdout 날짜를 `results/phase4/phase4_recommendation.json`에서 그대로 읽어 Baseline / Random / Equal / Volume Proportional / Entropy-based를 paired 비교합니다. Phase 5에서는 λ 재보정이나 Holdout 재분할을 하지 않습니다.
+```text
+results/phase4/phase4_recommendation.json
+```
 
-```bash
+### Phase 5 - Frozen Holdout 검증
+
+```powershell
 python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 ```
 
-Phase 6는 λ를 다시 선택하지 않고 Phase 5 Frozen Holdout에서 Calibration→Holdout Pareto trade-off, Entropy/Volume 배치 변경 날짜의 메커니즘, Holm 보정 Wilcoxon 및 paired bootstrap CI를 분석합니다.
+Phase 5에서는 Phase 4의 λ*와 Holdout 날짜를 그대로 사용하며 **λ 재선택 및 Holdout 재분할을 하지 않습니다.**
 
-```bash
+### Phase 6 - Trade-off / Mechanism / Robustness
+
+```powershell
 python -m entropy_thesis.simulation.phase6
 ```
 
-세부 모델링 정의와 출력 파일은 `README_PHASE1.md`, `README_PHASE2.md`, `README_PHASE3.md`, `README_PHASE4.md`, `README_PHASE5.md`, `README_PHASE6.md`를 참고합니다.
+Phase 6 역시 λ를 다시 선택하지 않고 Frozen Holdout 결과를 분석합니다.
 
-## 모델 범위와 한계
+---
 
-현재 구현은 논문 실험의 최소 기준 모델입니다. Shannon 엔트로피는 **구역 간 작업자
-배치의 공간적 집중도**를 측정하고, 대기열 지표는 그 배치가 처리 혼잡에 미치는 영향을
-측정합니다. 실제 좌표, 이동 거리, 통로 용량, 작업자 간 물리적 간섭, 밀도에 따른
-생산성 저하는 아직 모델링하지 않습니다. 따라서 현재 결과를 실제 통로 충돌이나 안전상
-혼잡의 직접 추정치로 해석해서는 안 됩니다. 해당 결론이 필요하면 aisle resource,
-이동 네트워크와 밀도별 서비스율 저하를 후속 모델에 추가해야 합니다.
-
-(2026-08-15 추가)
-프로젝트에는 초기의 단순 구역별 `M/M/c` 기준 모델과 Phase 1~3의 실제 데이터 모델이 함께 존재합니다. 실제 데이터 모델은 Storage/Support 좌표로 만든 이동 graph, edge/pick-node capacity, 이동거리, resource contention 대기 및 작업자 공간 엔트로피를 계산합니다.
-
-다만 Phase 2~3의 `congestion conflict`는 **실제 사람끼리 물리적으로 충돌한 횟수**가 아니라 capacity-limited edge 또는 pick node에 즉시 진입하지 못해 발생한 simulated waiting event입니다. 또한 작업자 간 회피행동, 통로 폭에 따른 연속 밀도 효과, 보행속도 저하, 안전거리, order consolidation 등은 아직 모델링하지 않습니다. 따라서 결과는 배치 전략 간 상대 비교용으로 해석하고, 실제 안전 충돌 건수의 직접 추정치로 사용하지 않습니다.
-
-## 테스트
-
-```bash
-pytest
-```
-
-GitHub Actions는 Linux와 Windows의 Python 3.13에서 테스트, 기본 CLI 실행, wheel 빌드를
-검증합니다.
-
-## 디렉터리 구조
+## 9. 결과 디렉터리
 
 ```text
-configs/             실험 설정
-data/raw/            원본 데이터
-data/processed/      전처리 데이터
-notebooks/           탐색 및 환경 확인 노트북
-results/             생성된 실험 결과
-results/figures/     생성된 시각화
-src/entropy_thesis/  핵심 계산·배치·시뮬레이션 코드
-tests/               단위 및 통합 테스트
+results/
+├─ phase2/     Observed Baseline DES 결과
+├─ phase3/     Random / Equal / Volume 비교 결과
+├─ phase4/     λ Calibration / Pareto 분석 / recommendation
+├─ phase5/     Frozen Holdout 5방법 비교 및 paired 통계
+├─ phase6/     Generalization / mechanism / bootstrap / Holm 분석
+└─ figures/    Picking Animation 시각화 결과
 ```
 
-`results/figures/`는 후속 분석 그래프를 위한 예약 경로이며 현재 CLI는 표·메타데이터를
-생성합니다. 원본·전처리 데이터와 생성 결과는 `.gitignore`로 제외하고 디렉터리 골격만
-`.gitkeep`으로 유지합니다.
+대표 결과 파일:
+
+```text
+results/phase4/phase4_recommendation.json
+results/phase4/phase4_pareto_analysis.csv
+results/phase5/phase5_daily_summary.csv
+results/phase5/phase5_comparison_summary.csv
+results/phase5/phase5_paired_comparison.csv
+results/phase6/phase6_calibration_holdout_generalization.csv
+results/phase6/phase6_pareto_metric_statistics.csv
+results/phase6/phase6_changed_dates.csv
+```
+
+각 Phase의 전체 출력 파일 정의는 Phase별 README를 참고합니다.
+
+---
+
+## 10. 주요 KPI
+
+| KPI | 의미 |
+|---|---|
+| `total_distance_m` | CC-08 출발 → 피킹 → CC-08 복귀 총 이동거리 |
+| `congestion_conflicts` | capacity-limited resource에 즉시 진입하지 못한 contention event 수 |
+| `congestion_wait_seconds` | resource contention으로 발생한 총 대기시간 |
+| `congestion_delay_ratio` | `Wait / (Movement + Wait)` |
+| `mean_release_delay_seconds` | picking list가 늦게 시작된 평균 지연시간 |
+| `mean_flow_time_seconds` | list release부터 완료까지의 평균 시간 |
+| `makespan_seconds` | 해당 운영일의 전체 작업 완료시간 |
+| `mean_spatial_entropy_normalized` | 시간에 따른 작업자 공간 분산 정도 |
+| `mean_spatial_entropy_multiworker` | active worker가 2명 이상인 시점만 계산한 공간 엔트로피 |
+
+> `congestion_conflicts`는 실제 사람끼리 부딪힌 물리적 충돌 횟수가 아니라 **DES resource contention event**입니다.
+
+---
+
+## 11. Picking Animation Visualization
+
+연구 결과 확인 및 논문 시연을 위해 HTML Viewer와 PySide6 Desktop Viewer를 제공합니다.
+
+### 11.1 전체 날짜 JSON + HTML 생성
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --all-dates
+```
+
+생성 구조:
+
+```text
+results/figures/
+├─ picking_animation_actual.html
+└─ picking_animation_actual_data/
+   ├─ 2023-01.json
+   ├─ 2023-02.json
+   ├─ ...
+   └─ 2023-10.json
+```
+
+생성과 동시에 localhost 서버 실행:
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --all-dates --serve
+```
+
+기존 JSON을 유지하고 HTML만 다시 생성:
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --html-only
+```
+
+HTML 재생성 후 바로 확인:
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --html-only --serve
+```
+
+### 11.2 Desktop Viewer
+
+```powershell
+python -m pip install PySide6
+python -m entropy_thesis.visualization.picking_animation_desktop
+```
+
+특정 날짜의 Entropy 시나리오:
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_desktop --date 2023-08-30 --method entropy
+```
+
+지원 method:
+
+```text
+observed / equal / random / volume / entropy
+```
+
+### 11.3 Windows EXE 빌드
+
+```powershell
+python -m pip install PySide6 pyinstaller orjson
+.\src\entropy_thesis\visualization\build_PickingSimulation.bat
+```
+
+실행:
+
+```powershell
+.\dist\PickingSimulation.exe
+```
+
+Desktop/EXE Viewer는 연구 결과를 다시 계산하지 않고 기존 DES 월별 JSON을 읽어 재생합니다.
+
+상세 사용법: [`src/entropy_thesis/visualization/README.md`](src/entropy_thesis/visualization/README.md)
+
+---
+
+## 12. 프로젝트 구조
+
+```text
+entropy-thesis/
+│
+├─ README.md                  # 프로젝트 전체 안내서
+├─ AGENTS.md                  # AI/코딩 에이전트용 프로젝트 규칙
+├─ docs/
+│  └─ phases/
+│     ├─ README_PHASE1.md
+│     ├─ README_PHASE2.md
+│     ├─ README_PHASE3.md
+│     ├─ README_PHASE4.md
+│     ├─ README_PHASE5.md
+│     └─ README_PHASE6.md
+│
+├─ pyproject.toml
+├─ requirements.txt
+├─ configs/
+├─ data/
+│  ├─ raw/
+│  └─ processed/
+│
+├─ src/entropy_thesis/
+│  ├─ allocation/
+│  ├─ simulation/
+│  │  ├─ phase1.py
+│  │  ├─ phase2.py
+│  │  ├─ phase3.py
+│  │  ├─ phase4.py
+│  │  ├─ phase5.py
+│  │  └─ phase6.py
+│  └─ visualization/
+│     ├─ picking_animation.py
+│     ├─ picking_animation_actual.py
+│     ├─ picking_animation_desktop.py
+│     ├─ PickingSimulation.spec
+│     ├─ build_PickingSimulation.bat
+│     └─ README.md
+│
+├─ results/
+│  ├─ phase2/
+│  ├─ phase3/
+│  ├─ phase4/
+│  ├─ phase5/
+│  ├─ phase6/
+│  └─ figures/
+│
+├─ notebooks/
+└─ tests/
+```
+
+루트에는 전체 안내서인 `README.md`와 에이전트 규칙인 `AGENTS.md`만 두고, Phase별 상세 연구 문서는 `docs/phases/`에 모읍니다. 과거 모델 정정 기록과 중간 결과 문서는 최종 Phase 문서에 통합하여 중복 문서를 유지하지 않습니다.
+
+---
+
+## 13. 상세 문서
+
+루트 README는 프로젝트 전체 안내서이며, 각 Phase의 상세 모델링·실행 옵션·출력 파일·최종 결과는 아래 문서에 분리합니다.
+
+- [Phase 1 - 실제 데이터 검증 및 Warehouse Graph](docs/phases/README_PHASE1.md)
+- [Phase 2 - Observed Baseline DES](docs/phases/README_PHASE2.md)
+- [Phase 3 - 기존 작업자 배치 전략 비교](docs/phases/README_PHASE3.md)
+- [Phase 4 - Entropy 정수 배치 및 λ Calibration](docs/phases/README_PHASE4.md)
+- [Phase 5 - Frozen Holdout Validation](docs/phases/README_PHASE5.md)
+- [Phase 6 - Trade-off / Mechanism / Robustness](docs/phases/README_PHASE6.md)
+- [Picking Animation Visualization](src/entropy_thesis/visualization/README.md)
+
+문서 관리 원칙은 **`README.md = 전체 안내`, `docs/phases = 연구 단계별 상세`, `visualization/README.md = 시각화 실행`**입니다. `MODEL_REVISION_*`, `PHASE4_*`, `PHASE6_RESULTS_*`, `README_PHASE*_Old.md`와 같은 중간 문서는 최종 Phase 문서에 내용을 통합한 뒤 제거했습니다.
+
+---
+
+## 14. 재현성 및 해석 원칙
+
+최종 논문 실험에서는 다음 원칙을 유지합니다.
+
+1. Phase 4 이전에 Calibration / Holdout을 분리합니다.
+2. Holdout은 λ 선택에 사용하지 않습니다.
+3. λ*는 Calibration에서 한 번만 선택합니다.
+4. Phase 5에서 λ를 다시 선택하지 않습니다.
+5. Holdout 날짜를 다시 샘플링하지 않습니다.
+6. Phase 6에서도 λ 또는 Holdout을 재조정하지 않습니다.
+7. Entropy와 Volume의 배치가 달라진 날짜만을 이용한 분석은 **메커니즘 설명용**이며 전체 Holdout 통계를 대체하지 않습니다.
+
+현재 모델의 congestion은 통로 및 pick node의 capacity-based contention을 표현합니다. 실제 사람 간 회피행동, 안전거리, 연속 보행밀도, 작업자별 보행속도 차이 등의 물리적 행동까지 직접 예측하는 모델은 아닙니다.
+
+또한 40일 Holdout 전체의 Holm 보정 검정에서는 4개 Pareto KPI가 0.05 수준의 유의성을 통과하지 않았습니다. 따라서 논문 결론은 **Entropy가 모든 상황에서 Volume보다 우월하다**가 아니라, **수요 집중도를 고려하여 효율성과 혼잡 사이의 대안적 Pareto 작업자 배치 정책을 구성할 수 있다**는 수준으로 해석합니다.
+
+---
+
+## 15. 권장 최종 실행 순서
+
+```powershell
+conda activate thesis-env
+
+# Phase 1
+python -m entropy_thesis.simulation.phase1 --data-dir data/raw
+
+# Test
+python -m pytest
+
+# Phase 2 sanity check
+python -m entropy_thesis.simulation.phase2 --data-dir data/raw --date 2023-01-05
+
+# Phase 3 sanity check
+python -m entropy_thesis.simulation.phase3 --data-dir data/raw --date 2023-01-05
+
+# Phase 4 Calibration
+python -m entropy_thesis.simulation.phase4 --data-dir data/raw
+
+# Phase 5 Frozen Holdout
+python -m entropy_thesis.simulation.phase5 --data-dir data/raw
+
+# Phase 6 Final Analysis
+python -m entropy_thesis.simulation.phase6
+
+# Visualization JSON / HTML
+python -m entropy_thesis.visualization.picking_animation_actual --all-dates
+
+# Desktop Viewer
+python -m entropy_thesis.visualization.picking_animation_desktop
+```
+
+---
+
+## 16. 핵심 결론
+
+현재 최종 실험에서 Entropy 기반 작업자 배치는 Volume Proportional 대비 Holdout 평균 **Mean Flow Time이 약 2.84% 증가**했지만, **Conflicts는 약 4.50%, Congestion Wait는 약 11.31%, Congestion Ratio는 약 5.85% 감소**했습니다.
+
+이는 제안 방법이 단순히 가장 빠른 작업자 배치를 찾는 것이 아니라, **수요량과 수요의 공간적 집중도를 함께 고려하여 처리효율과 혼잡 사이의 균형점을 선택하는 작업자 배치 정책**임을 보여줍니다.
