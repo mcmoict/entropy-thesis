@@ -36,4 +36,4 @@ jobs:
         run: python -m entropy_thesis --config configs/baseline.yaml --no-save
 
       - name: Build wheel
-        run: python -m pip wheel --no-deps --no-build-isolation . --wheel-dir dist
+        run: python -m pip wheel --no-deps . --wheel-dir dist
