@@ -11,6 +11,9 @@ Recommended placement:
 Typical execution:
     python -m entropy_thesis.visualization.picking_animation_desktop
 
+PyInstaller:
+    build_PickingSimulation.bat -> dist/PickingSimulation.exe
+
 Dependencies:
     pip install PySide6
 
@@ -28,6 +31,7 @@ from datetime import datetime, timedelta
 import html as html_lib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
@@ -80,12 +84,6 @@ except ImportError as exc:  # pragma: no cover - runtime convenience
         "    python -m pip install PySide6\n\n"
         f"원본 오류: {exc}"
     ) from exc
-
-try:
-    # Keep the same project data parser used by picking_animation_actual.py.
-    from ..simulation.data_loader import load_support_points
-except ImportError:  # pragma: no cover - direct-file fallback
-    load_support_points = None
 
 try:  # optional, considerably faster for very large monthly JSON files
     import orjson  # type: ignore
@@ -295,6 +293,8 @@ def _extract_svg_support_markers(root: ET.Element) -> list[tuple[float, float]]:
 
 def _support_point_code(point: Any) -> str | None:
     candidates: list[Any] = []
+    if isinstance(point, dict):
+        candidates.extend(point.values())
     for name in (
         "point_id", "support_point_id", "support_id", "location_id",
         "code", "name", "id", "point", "location",
@@ -403,15 +403,12 @@ def build_macro_zones(svg_path: Path, support_csv: Path) -> tuple[dict[str, Any]
     root = ET.fromstring(svg_path.read_text(encoding="utf-8"))
     markers = _extract_svg_support_markers(root)
 
-    if load_support_points is not None:
-        supports = load_support_points(support_csv)
-    else:
-        # Direct-file execution fallback.  Zone calibration only needs the CSV
-        # row order and point codes, so the project's dataclass parser is not
-        # required here.
-        with support_csv.open("r", encoding="utf-8-sig", newline="") as handle:
-            supports = list(csv.DictReader(handle))
-        print("[ZONE ] direct CSV fallback enabled")
+    # Standalone/PyInstaller build intentionally reads the CSV directly.
+    # This prevents the executable from importing the full simulation package
+    # (numpy/networkx/simpy/etc.) only to draw Z01~Z04.
+    with support_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+        supports = list(csv.DictReader(handle))
+    print("[ZONE ] standalone CSV calibration enabled")
 
     zones = _build_macro_zone_rectangles(support_points=supports, svg_markers=markers)
     if zones:
@@ -1368,6 +1365,144 @@ class PickingAnimationWindow(QMainWindow):
 
 
 # ---------------------------------------------------------------------------
+# Standalone / PyInstaller runtime path resolution
+# ---------------------------------------------------------------------------
+
+
+def _executable_dir() -> Path:
+    """Return the directory containing PickingSimulation.exe when frozen."""
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _candidate_project_roots(explicit_root: str | None = None) -> list[Path]:
+    """Return likely project roots in priority order.
+
+    The common build layout is::
+
+        entropy-thesis/
+          data/
+          results/
+          dist/PickingSimulation.exe
+
+    Therefore ``exe_dir.parent`` is checked automatically when the executable is
+    launched from ``dist``.  ``PICKING_SIMULATION_ROOT`` and ``--project-root``
+    can override auto discovery when the EXE is moved elsewhere.
+    """
+
+    values: list[Path] = []
+
+    def add(value: Path | str | None) -> None:
+        if value is None:
+            return
+        path = Path(value).expanduser().resolve()
+        if path not in values:
+            values.append(path)
+
+    add(explicit_root)
+    add(os.environ.get("PICKING_SIMULATION_ROOT"))
+    add(Path.cwd())
+
+    exe_dir = _executable_dir()
+    add(exe_dir)
+    add(exe_dir.parent)
+
+    # Source execution: visualization -> entropy_thesis -> src -> project root.
+    try:
+        source_file = Path(__file__).resolve()
+        if len(source_file.parents) >= 4:
+            add(source_file.parents[3])
+    except Exception:
+        pass
+
+    return values
+
+
+def _resolve_relative_path(
+    raw_value: str | Path,
+    *,
+    roots: list[Path],
+    expect_directory: bool = False,
+    must_exist: bool = True,
+) -> Path:
+    raw = Path(raw_value).expanduser()
+    candidates: list[Path]
+    if raw.is_absolute():
+        candidates = [raw]
+    else:
+        candidates = [root / raw for root in roots]
+
+    for candidate in candidates:
+        if expect_directory and candidate.is_dir():
+            return candidate.resolve()
+        if not expect_directory and candidate.is_file():
+            return candidate.resolve()
+
+    if must_exist:
+        kind = "디렉터리" if expect_directory else "파일"
+        searched = "\n".join(f"  - {path}" for path in candidates)
+        raise FileNotFoundError(
+            f"필요한 {kind}을 찾지 못했습니다: {raw_value}\n"
+            f"검색 위치:\n{searched}\n\n"
+            "EXE가 프로젝트의 dist 폴더에 있거나, --project-root로 프로젝트 루트를 지정했는지 확인해 주세요."
+        )
+
+    # Useful for an optional HTML manifest: return a deterministic candidate even
+    # when it does not exist because MonthlyDataStore can scan JSON directly.
+    return candidates[0].resolve()
+
+
+def _resolve_runtime_inputs(args: argparse.Namespace) -> tuple[Path, Path | None, Path, Path]:
+    roots = _candidate_project_roots(args.project_root)
+
+    # JSON is the only scenario data actually required.  Locate it independently
+    # so the viewer still works when the lightweight HTML manifest is absent.
+    if args.json_dir:
+        json_dir = _resolve_relative_path(
+            args.json_dir,
+            roots=roots,
+            expect_directory=True,
+            must_exist=True,
+        )
+    else:
+        default_json = "results/figures/picking_animation_actual_data"
+        json_dir = _resolve_relative_path(
+            default_json,
+            roots=roots,
+            expect_directory=True,
+            must_exist=True,
+        )
+
+    # HTML is optional.  If it is absent, MonthlyDataStore scans month JSON files.
+    html_path = _resolve_relative_path(
+        args.html,
+        roots=roots,
+        expect_directory=False,
+        must_exist=False,
+    )
+    if not html_path.exists():
+        sibling_html = json_dir.parent / "picking_animation_actual.html"
+        if sibling_html.exists():
+            html_path = sibling_html.resolve()
+
+    svg_path = _resolve_relative_path(
+        args.layout_svg,
+        roots=roots,
+        expect_directory=False,
+        must_exist=True,
+    )
+    support_csv = _resolve_relative_path(
+        args.support_points,
+        roots=roots,
+        expect_directory=False,
+        must_exist=True,
+    )
+    return html_path, json_dir, svg_path, support_csv
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1378,6 +1513,14 @@ def _parse_args() -> argparse.Namespace:
             "Native PySide6 desktop viewer for picking_animation_actual monthly JSON. "
             "No browser or localhost web server is required."
         )
+    )
+    parser.add_argument(
+        "--project-root",
+        default=None,
+        help=(
+            "entropy-thesis project root containing data/ and results/. "
+            "Usually auto-detected when EXE is in project-root/dist."
+        ),
     )
     parser.add_argument(
         "--html",
@@ -1410,30 +1553,43 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    html_path = Path(args.html)
-    json_dir = Path(args.json_dir) if args.json_dir else None
-    svg_path = Path(args.layout_svg)
-    support_csv = Path(args.support_points)
 
-    if not svg_path.exists():
-        raise FileNotFoundError(f"Layout SVG가 없습니다: {svg_path}")
-
-    store = MonthlyDataStore(html_path=html_path, json_dir=json_dir)
-    zones = build_macro_zones(svg_path, support_csv)
-
+    # Create QApplication before loading data so a windowed PyInstaller build can
+    # show startup errors instead of failing silently without a console.
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("Warehouse Picking Animation")
+    app.setApplicationName("PickingSimulation")
+    app.setApplicationDisplayName("Picking Simulation")
     app.setStyle("Fusion")
 
-    window = PickingAnimationWindow(
-        store=store,
-        svg_path=svg_path,
-        zones=zones,
-        start_date=args.date,
-        start_method=args.method,
-    )
-    window.show()
-    raise SystemExit(app.exec())
+    try:
+        html_path, json_dir, svg_path, support_csv = _resolve_runtime_inputs(args)
+        print(f"[ROOT ] runtime candidates={_candidate_project_roots(args.project_root)}")
+        print(f"[HTML ] {html_path} {'(optional/missing)' if not html_path.exists() else ''}")
+        print(f"[JSON ] {json_dir}")
+        print(f"[SVG  ] {svg_path}")
+        print(f"[SUP  ] {support_csv}")
+
+        store = MonthlyDataStore(html_path=html_path, json_dir=json_dir)
+        zones = build_macro_zones(svg_path, support_csv)
+
+        window = PickingAnimationWindow(
+            store=store,
+            svg_path=svg_path,
+            zones=zones,
+            start_date=args.date,
+            start_method=args.method,
+        )
+        window.show()
+        raise SystemExit(app.exec())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "PickingSimulation 시작 실패",
+            str(exc),
+        )
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

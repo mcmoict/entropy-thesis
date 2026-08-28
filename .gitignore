@@ -4,7 +4,6 @@ __pycache__/
 *.pyd
 *.egg-info/
 build/
-dist/
 
 # Virtual environments and local configuration
 .venv/

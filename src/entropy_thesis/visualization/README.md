@@ -387,3 +387,379 @@ README.md
 Desktop Viewer의 목적은 기존 DES 분석 결과를 변경하는 것이 아니라, 동일한 결과를 보다 부드럽고 독립적인 데스크톱 UI에서 재생하는 것입니다.
 
 따라서 논문 실험 결과 및 통계 분석에는 기존 시뮬레이션 결과를 그대로 사용하고, Desktop Viewer는 결과 확인 및 시각적 시연 도구로 활용하는 것을 권장합니다.
+
+---
+
+## 19. Macro-zone 표시 영역 축소
+
+HTML Viewer와 Desktop Viewer의 Z01 ~ Z04 Macro-zone은 실제 인력배치 구역의 논리적 정의는 그대로 유지하면서, 화면에서 보이는 외곽 사각형만 조금 안쪽으로 축소하여 표시합니다.
+
+현재 공통 축소 기준:
+
+```python
+MACRO_ZONE_HORIZONTAL_INSET_RATIO = 0.23
+MACRO_ZONE_VERTICAL_INSET_RATIO = 0.06
+```
+
+적용 방식:
+
+```text
+좌측 외곽 경계   → 오른쪽으로 축소
+우측 외곽 경계   → 왼쪽으로 축소
+위쪽 외곽 경계   → 아래쪽으로 축소
+아래쪽 외곽 경계 → 위쪽으로 축소
+```
+
+다음 중앙 경계는 변경하지 않습니다.
+
+```text
+CC-08 기준 중앙 세로 분할선
+Near / Far 중앙 가로 분할선
+```
+
+즉, Z01 ~ Z04의 연구상 구역 구분 자체를 변경하는 것이 아니라 **시각화용 외곽 표시 범위만 축소**합니다.
+
+HTML과 Desktop Viewer 모두 동일한 비율을 사용하는 것을 권장합니다.
+
+### HTML Viewer의 Macro-zone만 다시 반영
+
+기존 월별 JSON이 이미 생성되어 있다면 DES 시뮬레이션을 다시 실행할 필요가 없습니다.
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --html-only --serve
+```
+
+이 명령은 기존 월별 JSON을 유지하면서 `picking_animation_actual.html`만 다시 생성합니다.
+
+---
+
+## 20. PyInstaller로 Windows EXE 생성
+
+Desktop Viewer는 PyInstaller를 이용하여 Windows 실행 파일로 패키징할 수 있습니다.
+
+최종 실행 파일 예시:
+
+```text
+PickingSimulation.exe
+```
+
+EXE로 빌드하면 Python 모듈 실행 명령을 직접 입력하지 않고 일반 Windows 프로그램처럼 실행할 수 있습니다.
+
+Windows용 EXE는 **Windows 환경에서 PyInstaller를 실행하여 생성**해야 합니다.
+
+---
+
+## 21. PyInstaller 관련 권장 파일 구성
+
+`visualization` 디렉터리에 다음 파일을 함께 두는 것을 권장합니다.
+
+```text
+src/
+└─ entropy_thesis/
+   └─ visualization/
+      ├─ picking_animation_actual.py
+      ├─ picking_animation_desktop.py
+      ├─ PickingSimulation.spec
+      ├─ build_PickingSimulation.bat
+      ├─ PYINSTALLER_README.md
+      └─ README.md
+```
+
+각 파일의 역할:
+
+```text
+picking_animation_actual.py
+    HTML Actual Animation 및 월별 JSON 생성
+
+picking_animation_desktop.py
+    PySide6 기반 Desktop Viewer
+
+PickingSimulation.spec
+    PyInstaller 빌드 설정
+
+build_PickingSimulation.bat
+    Windows에서 PickingSimulation.exe를 자동 빌드하는 배치 파일
+
+PYINSTALLER_README.md
+    PyInstaller 전용 상세 빌드 설명
+
+README.md
+    Visualization 전체 사용 방법
+```
+
+---
+
+## 22. EXE 빌드 전 준비
+
+Conda 환경을 활성화합니다.
+
+```powershell
+conda activate thesis-env
+```
+
+필요 패키지를 설치합니다.
+
+```powershell
+python -m pip install PySide6 pyinstaller orjson
+```
+
+`orjson`은 필수는 아니지만 큰 월별 JSON 파일을 빠르게 읽는 데 도움이 되므로 권장합니다.
+
+설치 확인:
+
+```powershell
+python -m pip show PySide6
+python -m pip show pyinstaller
+python -m pip show orjson
+```
+
+---
+
+## 23. PickingSimulation.exe 자동 빌드
+
+프로젝트 루트에서 다음 배치 파일을 실행합니다.
+
+```powershell
+.\src\entropy_thesis\visualization\build_PickingSimulation.bat
+```
+
+또는 Windows Explorer에서 `build_PickingSimulation.bat`를 더블클릭할 수 있습니다.
+
+빌드가 정상 완료되면 일반적으로 다음 위치에 실행 파일이 생성됩니다.
+
+```text
+entropy-thesis/
+├─ data/
+├─ results/
+├─ src/
+└─ dist/
+   └─ PickingSimulation.exe
+```
+
+PyInstaller의 중간 빌드 파일은 일반적으로 다음 경로에 생성됩니다.
+
+```text
+build/
+dist/
+```
+
+---
+
+## 24. PickingSimulation.exe 실행
+
+빌드 후 프로젝트 루트에서 실행:
+
+```powershell
+.\dist\PickingSimulation.exe
+```
+
+또는 Windows Explorer에서 다음 파일을 더블클릭합니다.
+
+```text
+dist\PickingSimulation.exe
+```
+
+Desktop Viewer이므로 다음 항목은 필요하지 않습니다.
+
+```text
+Chrome / Edge
+localhost 서버
+--serve
+python -m http.server
+```
+
+---
+
+## 25. EXE에서 사용하는 데이터
+
+월별 JSON은 EXE 내부에 포함하지 않는 구성을 권장합니다.
+
+이유:
+
+- 월별 JSON의 크기가 큼
+- 실험 결과를 다시 생성할 수 있음
+- EXE와 데이터 파일을 분리하면 유지보수가 쉬움
+- HTML Viewer와 Desktop Viewer가 동일한 JSON을 공유할 수 있음
+
+권장 프로젝트 구조:
+
+```text
+entropy-thesis/
+├─ data/
+│  ├─ raw/
+│  │  └─ Support_Points_Navigation.csv
+│  └─ raw_original/
+│     └─ Layout_Z1.0.svg
+├─ results/
+│  └─ figures/
+│     ├─ picking_animation_actual.html
+│     └─ picking_animation_actual_data/
+│        ├─ 2023-01.json
+│        ├─ 2023-02.json
+│        ├─ ...
+│        └─ 2023-10.json
+└─ dist/
+   └─ PickingSimulation.exe
+```
+
+EXE는 기본적으로 프로젝트의 기존 `data` 및 `results` 파일을 사용합니다.
+
+---
+
+## 26. EXE를 다른 위치에서 실행하는 경우
+
+`PickingSimulation.exe`를 프로젝트의 `dist` 디렉터리가 아닌 다른 위치로 복사해 실행하는 경우, 프로젝트 루트를 명시할 수 있습니다.
+
+```powershell
+PickingSimulation.exe --project-root "C:\workspace\entropy-thesis"
+```
+
+이 옵션을 사용하면 EXE가 다음 파일을 해당 프로젝트 루트를 기준으로 찾을 수 있습니다.
+
+```text
+results/figures/picking_animation_actual_data/
+results/figures/picking_animation_actual.html
+data/raw_original/Layout_Z1.0.svg
+data/raw/Support_Points_Navigation.csv
+```
+
+---
+
+## 27. EXE에서 특정 날짜 및 방법으로 시작
+
+특정 날짜:
+
+```powershell
+PickingSimulation.exe --date 2023-08-30
+```
+
+Entropy:
+
+```powershell
+PickingSimulation.exe --method entropy
+```
+
+특정 날짜의 Entropy 시나리오:
+
+```powershell
+PickingSimulation.exe --date 2023-08-30 --method entropy
+```
+
+프로젝트 루트까지 함께 지정:
+
+```powershell
+PickingSimulation.exe ^
+  --project-root "C:\workspace\entropy-thesis" ^
+  --date 2023-08-30 ^
+  --method entropy
+```
+
+---
+
+## 28. Python 실행과 EXE 실행 비교
+
+Python 모듈 실행:
+
+```text
+Conda / Python 환경 필요
+PySide6 설치 필요
+python -m ... 명령 사용
+개발 및 수정에 적합
+```
+
+PyInstaller EXE 실행:
+
+```text
+PickingSimulation.exe 직접 실행
+Python 명령 입력 불필요
+논문 발표 및 시연에 적합
+사용자 입장에서 일반 Windows 프로그램처럼 실행
+```
+
+따라서 개발 중에는 Python 모듈 방식으로 실행하고, 최종 시연이나 배포 시에는 `PickingSimulation.exe`를 사용하는 것을 권장합니다.
+
+---
+
+## 29. 최종 권장 운영 구조
+
+```text
+                    ┌─ HTML Viewer
+DES / Monthly JSON ─┼─ Desktop Viewer
+                    └─ PickingSimulation.exe
+```
+
+구체적으로:
+
+```text
+picking_animation_actual.py
+    ↓
+월별 JSON 생성
+    ↓
+┌───────────────────────────────────────┐
+│ picking_animation_actual.html         │  웹 Viewer
+│ picking_animation_desktop.py          │  Python Desktop Viewer
+│ PickingSimulation.exe                 │  Windows 실행 파일
+└───────────────────────────────────────┘
+```
+
+세 Viewer가 동일한 DES 결과와 월별 JSON 데이터를 공유하므로 시각화 방식이 달라져도 연구 결과 자체는 동일하게 유지됩니다.
+
+---
+
+## 30. 최종 권장 사용 순서
+
+### 연구 데이터 또는 시뮬레이션 결과를 새로 생성한 경우
+
+```powershell
+conda activate thesis-env
+python -m entropy_thesis.visualization.picking_animation_actual --all-dates
+```
+
+### HTML Viewer의 표시만 수정한 경우
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_actual --html-only --serve
+```
+
+### Desktop Viewer 개발 및 테스트
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_desktop
+```
+
+### 특정 날짜 Entropy 테스트
+
+```powershell
+python -m entropy_thesis.visualization.picking_animation_desktop --date 2023-08-30 --method entropy
+```
+
+### 최종 Windows EXE 빌드
+
+```powershell
+.\src\entropy_thesis\visualization\build_PickingSimulation.bat
+```
+
+### 최종 EXE 실행
+
+```powershell
+.\dist\PickingSimulation.exe
+```
+
+---
+
+## 31. 최종 정리
+
+Visualization 모듈의 역할은 DES 실험 결과를 변경하는 것이 아니라 동일한 결과를 여러 방식으로 확인하고 시연하기 위한 것입니다.
+
+```text
+HTML Viewer
+    웹 기반 확인 및 공유
+
+Desktop Viewer
+    Qt 기반 고성능 애니메이션 및 개발
+
+PickingSimulation.exe
+    최종 Windows 시연 및 실행
+```
+
+특히 논문 발표나 결과 시연 시에는 `PickingSimulation.exe`를 사용하면 브라우저 주소창이나 localhost 서버 없이 독립적인 프로그램 형태로 실행할 수 있어 보다 완성된 시각화 결과를 보여줄 수 있습니다.
