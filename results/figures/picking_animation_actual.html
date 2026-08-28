@@ -12,8 +12,9 @@
   .visual-panel { min-width: 0; background: #fff; border-radius: 14px; box-shadow: 0 5px 22px rgba(15,23,42,.06); padding: 10px; }
   #svg-stack { position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: #fff; border-radius: 10px; }
   #svg-stack > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-  #overlay .marker circle { stroke: #fff; stroke-width: 2.2; transition: fill .08s linear, stroke .08s linear, stroke-width .08s linear; }
-  #overlay .marker text { font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; transition: fill .08s linear; }
+  #overlay .marker { pointer-events: none; }
+  #overlay .marker circle { stroke: #fff; stroke-width: 2.2; }
+  #overlay .marker text { font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; }
   #overlay .marker.collision circle { fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }
   #overlay .marker.collision text { fill: #fff; }
   #overlay .zone-rect { pointer-events: none; }
@@ -38826,6 +38827,21 @@
   let loadedMonthData = null;
   let loadToken = 0;
 
+  // Performance: 작업자 위치는 브라우저 프레임마다 갱신하지만,
+  // 상태 패널/슬라이더 같은 HTML UI는 10 FPS로 제한한다.
+  // 고배속에서도 프레임 수를 늘리지 않고 시뮬레이션 시간만 빠르게 진행한다.
+  const UI_REFRESH_MS = 100;
+  let lastUiRenderMs = -Infinity;
+
+  // Performance: conflict_events를 매 프레임 filter()하지 않고 시간 순 cursor로 소비한다.
+  // 슬라이더로 과거 시각으로 이동할 때만 cursor를 재구성한다.
+  let preparedConflictEvents = [];
+  let conflictCursor = 0;
+  let activeConflictPool = [];
+  let cumulativePickerPrefix = [0];
+  let lastConflictTime = -Infinity;
+  let hasExactConflictEvents = false;
+
   function formatSeconds(value) {
     const total = Math.max(0, Math.floor(Number(value) || 0));
     const h = String(Math.floor(total / 3600)).padStart(2, '0');
@@ -38890,7 +38906,7 @@
     playing = true;
     playBtn.textContent = '⏸ 일시정지';
     lastTs = null;
-    render();
+    render(true);
     raf = requestAnimationFrame(tick);
   }
 
@@ -38994,6 +39010,59 @@
     zoneLayer.style.display = zonesChk.checked ? '' : 'none';
   }
 
+  function prepareConflictIndex() {
+    hasExactConflictEvents = Array.isArray(scenario && scenario.conflict_events);
+    preparedConflictEvents = hasExactConflictEvents
+      ? scenario.conflict_events.slice().sort((a, b) => Number(a.t0) - Number(b.t0))
+      : [];
+    conflictCursor = 0;
+    activeConflictPool = [];
+    lastConflictTime = -Infinity;
+    cumulativePickerPrefix = new Array(preparedConflictEvents.length + 1);
+    cumulativePickerPrefix[0] = 0;
+    for (let i = 0; i < preparedConflictEvents.length; i++) {
+      const ids = Array.isArray(preparedConflictEvents[i].worker_ids)
+        ? preparedConflictEvents[i].worker_ids.length
+        : 0;
+      cumulativePickerPrefix[i + 1] = cumulativePickerPrefix[i] + ids;
+    }
+  }
+
+  function conflictSnapshot(t) {
+    if (!hasStarted || !hasExactConflictEvents) {
+      return { active: [], collisionWorkers: new Set(), cumulativeCount: 0, cumulativePickerCount: 0 };
+    }
+
+    // 슬라이더/날짜 이동 등으로 시간이 뒤로 간 경우에만 cursor를 초기화한다.
+    if (t + 1e-9 < lastConflictTime) {
+      conflictCursor = 0;
+      activeConflictPool = [];
+    }
+
+    while (conflictCursor < preparedConflictEvents.length &&
+           Number(preparedConflictEvents[conflictCursor].t0) <= t) {
+      activeConflictPool.push(preparedConflictEvents[conflictCursor]);
+      conflictCursor += 1;
+    }
+
+    // 이미 종료된 이벤트만 제거하므로 일반 재생에서는 active event 수만큼만 검사한다.
+    if (activeConflictPool.length) {
+      activeConflictPool = activeConflictPool.filter(event => Number(event.t1) >= t);
+    }
+    lastConflictTime = t;
+
+    const collisionWorkers = new Set();
+    activeConflictPool.forEach(event => {
+      (event.worker_ids || []).forEach(workerId => collisionWorkers.add(String(workerId)));
+    });
+    return {
+      active: activeConflictPool,
+      collisionWorkers,
+      cumulativeCount: conflictCursor,
+      cumulativePickerCount: cumulativePickerPrefix[conflictCursor] || 0
+    };
+  }
+
   function rebuildWorkers() {
     overlay.innerHTML = '';
     workerSel.innerHTML = '<option value="ALL">전체 작업자</option>';
@@ -39063,7 +39132,10 @@
         `<div class="distance">${worker.total_distance_m.toFixed(1)} m</div>`;
       workerList.appendChild(row);
       const dot = row.querySelector('.dot');
-      markerMap.set(worker.worker_id, { g, c, t, dot, baseColor: color });
+      markerMap.set(worker.worker_id, {
+        g, c, t, dot, baseColor: color,
+        lastX: NaN, lastY: NaN, lastVisible: null, lastCollision: null, lastOpacity: null
+      });
     });
     selectedWorker = 'ALL';
   }
@@ -39083,67 +39155,63 @@
     return {x: seg.sx0 + (seg.sx1 - seg.sx0) * r, y: seg.sy0 + (seg.sy1 - seg.sy0) * r};
   }
 
-  function render() {
+  function render(forceUi = false) {
     if (!scenario) return;
-    slider.value = String(currentTime);
-    timeLabel.textContent = formatSeconds(currentTime);
 
-    // 먼저 모든 작업자의 현재 위치를 계산한다. 작업자 한 명만 화면에 표시하는
-    // 경우에도, 숨겨진 다른 작업자와의 충돌 여부는 정상적으로 계산된다.
-    const frameStates = scenario.workers.map(worker => {
+    const conflictState = conflictSnapshot(currentTime);
+    const activeConflictEvents = conflictState.active;
+    const collisionWorkers = conflictState.collisionWorkers;
+    const nowMs = performance.now();
+    const updateUi = forceUi || (nowMs - lastUiRenderMs >= UI_REFRESH_MS);
+    const states = updateUi ? [] : null;
+
+    // 매 프레임에는 작업자 marker의 위치만 최소 변경한다.
+    // circle(cx/cy) + text(x/y) 4개 속성 대신 부모 <g>의 transform 1개만 갱신한다.
+    scenario.workers.forEach(worker => {
       const seg = findSegment(worker, currentTime);
-      const p = position(seg, currentTime);
-      return { worker, seg, p };
-    });
+      let x = Number(seg.sx1);
+      let y = Number(seg.sy1);
+      if (seg.kind === 'move' && seg.t1 > seg.t0) {
+        const r = Math.max(0, Math.min(1, (currentTime - seg.t0) / (seg.t1 - seg.t0)));
+        x = Number(seg.sx0) + (Number(seg.sx1) - Number(seg.sx0)) * r;
+        y = Number(seg.sy0) + (Number(seg.sy1) - Number(seg.sy0)) * r;
+      }
 
-    const conflictEvents = Array.isArray(scenario.conflict_events) ? scenario.conflict_events : [];
-    // 시나리오를 막 불러온 재생 대기 상태에서는 t=0의 DES 이벤트를
-    // 아직 발생한 것으로 표시하지 않는다. 사용자가 재생하거나 슬라이더를
-    // 직접 움직인 뒤부터 실제 시간축의 충돌 이벤트를 표시한다.
-    const activeConflictEvents = hasStarted
-      ? conflictEvents.filter(event =>
-          currentTime >= Number(event.t0) && currentTime <= Number(event.t1)
-        )
-      : [];
-    const collisionWorkers = new Set();
-    activeConflictEvents.forEach(event => {
-      (event.worker_ids || []).forEach(workerId => collisionWorkers.add(String(workerId)));
-    });
-
-    // 누적 충돌 이벤트: 재생 시작(0초)부터 현재 시각까지
-    // 실제 DES conflict event의 시작시각(t0)이 지난 이벤트 수.
-    const cumulativeConflictEvents = hasStarted
-      ? conflictEvents.filter(event => Number(event.t0) <= currentTime)
-      : [];
-
-    // 누적 충돌 피커: 각 누적 충돌 이벤트에 포함된 worker_ids 수를 합산.
-    // 동일 피커가 여러 번 충돌하면 발생 횟수만큼 반복 누적한다.
-    const cumulativeConflictPickerCount = cumulativeConflictEvents.reduce(
-      (sum, event) =>
-        sum + (Array.isArray(event.worker_ids) ? event.worker_ids.length : 0),
-      0
-    );
-
-    // 구버전 JSON에는 conflict_events가 없다. 이 경우 거리로 추정하지 않는다.
-    const hasExactConflictEvents = Array.isArray(scenario.conflict_events);
-
-    const states = [];
-    frameStates.forEach(({ worker, seg, p }) => {
       const marker = markerMap.get(worker.worker_id);
+      if (!marker) return;
       const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
       const colliding = collisionWorkers.has(worker.worker_id);
+      const opacity = hasStarted && seg.kind === 'idle' ? '0.68' : '1';
 
-      marker.g.style.display = visible ? '' : 'none';
-      marker.g.classList.toggle('collision', colliding);
-      marker.c.setAttribute('fill', marker.baseColor);
-      if (marker.dot) marker.dot.style.background = colliding ? '#ef4444' : marker.baseColor;
+      if (marker.lastVisible !== visible) {
+        marker.g.style.display = visible ? '' : 'none';
+        marker.lastVisible = visible;
+      }
+      if (marker.lastCollision !== colliding) {
+        marker.g.classList.toggle('collision', colliding);
+        if (marker.dot) marker.dot.style.background = colliding ? '#ef4444' : marker.baseColor;
+        marker.lastCollision = colliding;
+      }
+      if (marker.lastOpacity !== opacity) {
+        marker.g.setAttribute('opacity', opacity);
+        marker.lastOpacity = opacity;
+      }
+      if (!Number.isFinite(marker.lastX) || Math.abs(marker.lastX - x) > 0.0005 ||
+          !Number.isFinite(marker.lastY) || Math.abs(marker.lastY - y) > 0.0005) {
+        marker.g.setAttribute('transform', `translate(${x.toFixed(3)} ${y.toFixed(3)})`);
+        marker.lastX = x;
+        marker.lastY = y;
+      }
 
-      marker.c.setAttribute('cx', p.x.toFixed(3)); marker.c.setAttribute('cy', p.y.toFixed(3));
-      marker.t.setAttribute('x', p.x.toFixed(3)); marker.t.setAttribute('y', p.y.toFixed(3));
-      marker.g.setAttribute('opacity', hasStarted && seg.kind === 'idle' ? '0.68' : '1');
-
-      if (visible) states.push(`${worker.worker_id}(${seg.kind}${colliding ? ', 충돌' : ''})`);
+      if (updateUi && visible) {
+        states.push(`${worker.worker_id}(${seg.kind}${colliding ? ', 충돌' : ''})`);
+      }
     });
+
+    if (!updateUi) return;
+    lastUiRenderMs = nowMs;
+    slider.value = String(currentTime);
+    timeLabel.textContent = formatSeconds(currentTime);
 
     const conflictPreview = activeConflictEvents.length
       ? activeConflictEvents.slice(0, 5).map(event => {
@@ -39165,7 +39233,7 @@
       `<strong>피킹 대상 포인트</strong> : ${currentPickTargets.length}개<br>` +
       `<strong>DES Conflicts</strong> : ${totalConflicts}회 · <strong>총 대기</strong> : ${totalWait.toFixed(2)}초<br>` +
       `<strong>현재 충돌 이벤트</strong> : ${activeConflictEvents.length}개 · <strong>충돌 피커</strong> : ${collisionWorkers.size}명<br>` +
-      `<strong>누적 충돌 이벤트</strong> : ${cumulativeConflictEvents.length}개 · <strong>누적 충돌 피커</strong> : ${cumulativeConflictPickerCount}명<br>` +
+      `<strong>누적 충돌 이벤트</strong> : ${conflictState.cumulativeCount}개 · <strong>누적 충돌 피커</strong> : ${conflictState.cumulativePickerCount}명<br>` +
       `<strong>현재 충돌</strong> : ${conflictPreview}<br>` +
       `<strong>이벤트 소스</strong> : ${hasExactConflictEvents ? '실제 DES resource contention' : '구버전 JSON · 실제 이벤트 없음'}<br>` +
       `<strong>상태</strong> : ${stateText}`);
@@ -39235,9 +39303,11 @@
       }
       allocationInfo.textContent = allocationText;
 
+      prepareConflictIndex();
       rebuildWorkers();
       document.getElementById('metaPickTargets').textContent = `${currentPickTargets.length}개 포인트`;
-      render();
+      lastUiRenderMs = -Infinity;
+      render(true);
       if (autoPlay) start();
     } catch (error) {
       if (token === loadToken) dataLoadError(error);
@@ -39268,7 +39338,7 @@
     currentTime += dt * Number(speedSel.value || 1);
     if (currentTime >= scenario.meta.simulation_end_seconds) {
       currentTime = scenario.meta.simulation_end_seconds;
-      render();
+      render(true);
       stop();
 
       // 옵션이 체크되어 있을 때만 같은 방법의 다음 사용 가능 날짜를 자동 재생한다.
@@ -39283,7 +39353,7 @@
 
   playBtn.addEventListener('click', () => playing ? stop() : start());
   speedSel.addEventListener('change', () => { lastTs = null; });
-  workerSel.addEventListener('change', e => { selectedWorker = e.target.value; render(); });
+  workerSel.addEventListener('change', e => { selectedWorker = e.target.value; render(true); });
   pickTargetsChk.addEventListener('change', () => {
     if (pickTargetLayer) pickTargetLayer.style.display = pickTargetsChk.checked ? '' : 'none';
   });
@@ -39293,7 +39363,12 @@
   slider.addEventListener('input', e => {
     hasStarted = true;
     currentTime = Number(e.target.value || 0);
-    render();
+    render(false);
+  });
+  slider.addEventListener('change', e => {
+    hasStarted = true;
+    currentTime = Number(e.target.value || 0);
+    render(true);
   });
   dateSel.addEventListener('change', e => { void loadScenario(e.target.value, currentMethod, false); });
   methodSel.addEventListener('change', e => { void loadScenario(currentDate, e.target.value, false); });
