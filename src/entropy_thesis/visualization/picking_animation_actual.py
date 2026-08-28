@@ -668,6 +668,85 @@ def _extract_actual_conflict_events(
     )
 
 
+def _build_pick_targets(
+    *,
+    workers: dict[str, Any],
+    node_raw: dict[str, tuple[float, float]],
+    svg_transform: SvgAxesTransform,
+) -> list[dict[str, Any]]:
+    """Aggregate the day's actual pick-event destinations into SVG target points.
+
+    The marker is keyed by simulation node so repeated picks at the same physical
+    point are represented once, with visit count / quantity retained for tooltip
+    and label display in the browser.
+    """
+
+    targets: dict[str, dict[str, Any]] = {}
+    for worker_id in sorted(workers):
+        worker = workers[worker_id]
+        for event in getattr(worker, "pick_events", ()):
+            node_id = str(getattr(event, "node_id", "") or "")
+            if not node_id or node_id not in node_raw:
+                continue
+
+            raw_x, raw_y = node_raw[node_id]
+            sx, sy = svg_transform.raw_to_svg(raw_x, raw_y)
+            location_id = getattr(event, "location_id", None)
+            reference = getattr(event, "reference", None)
+            quantity_units = _finite_float(getattr(event, "quantity_units", None)) or 0.0
+            started_at = _finite_float(getattr(event, "started_at", None))
+            finished_at = _finite_float(getattr(event, "finished_at", None))
+
+            item = targets.setdefault(
+                node_id,
+                {
+                    "node_id": node_id,
+                    "sx": round(float(sx), 3),
+                    "sy": round(float(sy), 3),
+                    "pick_events": 0,
+                    "quantity_units": 0.0,
+                    "worker_ids": set(),
+                    "location_ids": set(),
+                    "references": set(),
+                    "first_pick_at": None,
+                    "last_pick_at": None,
+                },
+            )
+            item["pick_events"] += 1
+            item["quantity_units"] += float(quantity_units)
+            item["worker_ids"].add(str(worker_id))
+            if location_id is not None:
+                item["location_ids"].add(str(location_id))
+            if reference is not None:
+                item["references"].add(str(reference))
+            if started_at is not None:
+                current = item["first_pick_at"]
+                item["first_pick_at"] = started_at if current is None else min(current, started_at)
+            if finished_at is not None:
+                current = item["last_pick_at"]
+                item["last_pick_at"] = finished_at if current is None else max(current, finished_at)
+
+    result: list[dict[str, Any]] = []
+    for item in targets.values():
+        result.append(
+            {
+                "node_id": item["node_id"],
+                "sx": item["sx"],
+                "sy": item["sy"],
+                "pick_events": int(item["pick_events"]),
+                "quantity_units": round(float(item["quantity_units"]), 3),
+                "worker_ids": sorted(item["worker_ids"]),
+                "location_ids": sorted(item["location_ids"]),
+                "references": sorted(item["references"]),
+                "first_pick_at": round(float(item["first_pick_at"]), 3) if item["first_pick_at"] is not None else None,
+                "last_pick_at": round(float(item["last_pick_at"]), 3) if item["last_pick_at"] is not None else None,
+            }
+        )
+
+    result.sort(key=lambda item: (item["sy"], item["sx"], item["node_id"]))
+    return result
+
+
 def build_animation_payload(
     *,
     warehouse: WarehouseGraph,
@@ -691,6 +770,11 @@ def build_animation_payload(
     summary = getattr(simulation, "summary", None)
     congestion_conflicts = int(round(float(getattr(summary, "congestion_conflicts", 0) or 0)))
     congestion_wait_seconds = float(getattr(summary, "congestion_wait_seconds", 0.0) or 0.0)
+    pick_targets = _build_pick_targets(
+        workers=workers,
+        node_raw=node_raw,
+        svg_transform=svg_transform,
+    )
 
     workers_payload: list[dict[str, Any]] = []
     for worker_id in sorted(workers):
@@ -755,8 +839,11 @@ def build_animation_payload(
             "congestion_wait_seconds": round(congestion_wait_seconds, 3),
             "conflict_event_count": len(conflict_events),
             "conflict_event_source": "DES resource contention",
+            "picking_target_points": len(pick_targets),
+            "picking_target_events": sum(item["pick_events"] for item in pick_targets),
         },
         "workers": workers_payload,
+        "pick_targets": pick_targets,
         "conflict_events": conflict_events,
     }
 
@@ -1076,6 +1163,9 @@ def render_single_html(
   #overlay .marker text {{ font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; transition: fill .08s linear; }}
   #overlay .marker.collision circle {{ fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }}
   #overlay .marker.collision text {{ fill: #fff; }}
+  #overlay .pick-target circle {{ fill: #f59e0b; fill-opacity: .34; stroke: #b45309; stroke-width: 1.5; }}
+  #overlay .pick-target text {{ font-size: 8px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #78350f; pointer-events: none; }}
+  #overlay .pick-target {{ pointer-events: auto; }}
   .controls {{ display: grid; grid-template-columns: auto 76px 150px minmax(120px,1fr) 74px; gap: 9px; align-items: center; padding: 8px 0 0; }}
   .play-options {{ display: flex; justify-content: flex-start; align-items: center; gap: 12px; padding: 7px 2px 0; font-size: 13px; color: #455065; }}
   .play-option-label {{ display: inline-flex; align-items: center; gap: 7px; cursor: pointer; user-select: none; }}
@@ -1143,6 +1233,10 @@ def render_single_html(
           <input id="autoNextDateChk" type="checkbox" />
           <span>다음 날짜 자동실행</span>
         </label>
+        <label class="play-option-label" for="pickTargetsChk">
+          <input id="pickTargetsChk" type="checkbox" checked />
+          <span>피킹 대상 표시</span>
+        </label>
       </div>
     </main>
 
@@ -1152,12 +1246,14 @@ def render_single_html(
         <div class="key">방법</div><div class="value"><select id="methodSel" aria-label="배치 방법">{method_options}</select></div>
         <div class="key">피킹리스트 수</div><div class="value" id="metaLists">-</div>
         <div class="key">작업자 수</div><div class="value" id="metaWorkers">-</div>
+        <div class="key">피킹 대상</div><div class="value" id="metaPickTargets">-</div>
         <div class="key">총 재생시간</div><div class="value" id="metaDuration">-</div>
       </div>
       <div class="allocation" id="allocationInfo"></div>
       <div class="status loading" id="statusBox">월별 데이터를 불러오는 중입니다.</div>
       <div class="notes">
-        - 원형 마커는 작업자 현재 위치입니다.<br />
+        - 큰 원형 마커는 작업자 현재 위치입니다.<br />
+        - 주황색 반투명 포인트는 당일 Picking_Wave의 피킹 대상 위치입니다. 숫자는 동일 포인트의 피킹 이벤트 수입니다.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
         - 논문의 Conflicts와 동일한 DES resource contention 대기 구간에만 해당 피커가 빨간색으로 표시됩니다.<br />
         - '다음 날짜 자동실행' 체크 시 날짜가 끝나면 같은 방법의 다음 사용 가능 날짜를 자동 재생합니다.<br />
@@ -1185,6 +1281,7 @@ def render_single_html(
   const speedSel = document.getElementById('speedSel');
   const playBtn = document.getElementById('playBtn');
   const autoNextDateChk = document.getElementById('autoNextDateChk');
+  const pickTargetsChk = document.getElementById('pickTargetsChk');
   const slider = document.getElementById('timeSlider');
   const timeLabel = document.getElementById('timeLabel');
   const workerList = document.getElementById('workerList');
@@ -1225,6 +1322,8 @@ def render_single_html(
   let selectedWorker = 'ALL';
   let markerMap = new Map();
   let workerIndices = new Map();
+  let pickTargetLayer = null;
+  let currentPickTargets = [];
   let loadedMonthKey = null;
   let loadedMonthData = null;
   let loadToken = 0;
@@ -1333,6 +1432,38 @@ def render_single_html(
     return dateScenarios;
   }}
 
+  function derivePickTargets() {{
+    // v7 JSON은 풍부한 pick_targets 메타데이터를 사용한다.
+    if (Array.isArray(scenario.pick_targets) && scenario.pick_targets.length) {{
+      return scenario.pick_targets;
+    }}
+
+    // 구버전(v6 이하) 월별 JSON도 HTML-only 재생성만으로 표시할 수 있도록
+    // worker.segments의 pick 좌표를 물리 포인트별로 합친다.
+    const byPoint = new Map();
+    (scenario.workers || []).forEach(worker => {{
+      (worker.segments || []).forEach(seg => {{
+        if (seg.kind !== 'pick') return;
+        const sx = Number(seg.sx1);
+        const sy = Number(seg.sy1);
+        if (!Number.isFinite(sx) || !Number.isFinite(sy)) return;
+        const key = `${{sx.toFixed(3)}}|${{sy.toFixed(3)}}`;
+        let item = byPoint.get(key);
+        if (!item) {{
+          item = {{
+            node_id: `SVG(${{sx.toFixed(1)}}, ${{sy.toFixed(1)}})`,
+            sx, sy, pick_events: 0, quantity_units: 0,
+            worker_ids: [], location_ids: [], references: []
+          }};
+          byPoint.set(key, item);
+        }}
+        item.pick_events += 1;
+        if (!item.worker_ids.includes(worker.worker_id)) item.worker_ids.push(worker.worker_id);
+      }});
+    }});
+    return Array.from(byPoint.values());
+  }}
+
   function rebuildWorkers() {{
     overlay.innerHTML = '';
     workerSel.innerHTML = '<option value="ALL">전체 작업자</option>';
@@ -1340,13 +1471,54 @@ def render_single_html(
     markerMap = new Map();
     workerIndices = new Map();
 
+    // 피킹 대상은 작업자 마커보다 먼저 그려 항상 배경 레이어에 놓는다.
+    pickTargetLayer = svgNode('g');
+    pickTargetLayer.setAttribute('id', 'pick-target-layer');
+    overlay.appendChild(pickTargetLayer);
+    currentPickTargets = derivePickTargets();
+    currentPickTargets.forEach(target => {{
+      const g = svgNode('g');
+      g.setAttribute('class', 'pick-target');
+      const events = Math.max(1, Number(target.pick_events) || 1);
+      const radius = Math.min(12, 6 + Math.log2(events + 1) * 1.6);
+      const c = svgNode('circle');
+      c.setAttribute('cx', Number(target.sx).toFixed(3));
+      c.setAttribute('cy', Number(target.sy).toFixed(3));
+      c.setAttribute('r', radius.toFixed(2));
+      g.appendChild(c);
+
+      if (events > 1) {{
+        const t = svgNode('text');
+        t.setAttribute('x', Number(target.sx).toFixed(3));
+        t.setAttribute('y', Number(target.sy).toFixed(3));
+        t.textContent = String(events);
+        g.appendChild(t);
+      }}
+
+      const title = svgNode('title');
+      const locations = Array.isArray(target.location_ids) && target.location_ids.length
+        ? target.location_ids.join(', ')
+        : target.node_id;
+      const workers = Array.isArray(target.worker_ids) ? target.worker_ids.join(', ') : '';
+      const qty = Number(target.quantity_units);
+      const qtyText = Number.isFinite(qty) && qty > 0 ? ` | 수량=${{qty.toFixed(1)}}` : '';
+      title.textContent = `피킹 대상: ${{locations}} | 이벤트=${{events}}${{qtyText}}${{workers ? ' | 작업자=' + workers : ''}}`;
+      g.appendChild(title);
+      pickTargetLayer.appendChild(g);
+    }});
+    pickTargetLayer.style.display = pickTargetsChk.checked ? '' : 'none';
+
+    const workerLayer = svgNode('g');
+    workerLayer.setAttribute('id', 'worker-marker-layer');
+    overlay.appendChild(workerLayer);
+
     scenario.workers.forEach((worker, index) => {{
       workerIndices.set(worker.worker_id, 0);
       const color = colorForIndex(index);
       const g = svgNode('g'); g.setAttribute('class', 'marker');
       const c = svgNode('circle'); c.setAttribute('r', '12'); c.setAttribute('fill', color);
       const t = svgNode('text'); t.textContent = shortWorkerLabel(worker.worker_id, index);
-      g.appendChild(c); g.appendChild(t); overlay.appendChild(g);
+      g.appendChild(c); g.appendChild(t); workerLayer.appendChild(g);
 
       const option = document.createElement('option');
       option.value = worker.worker_id; option.textContent = worker.worker_id; workerSel.appendChild(option);
@@ -1457,6 +1629,7 @@ def render_single_html(
       `<strong>실제 시간</strong> : ${{formatActualDateTime(currentTime)}}<br>` +
       `<strong>표시 작업자</strong> : ${{selectedWorker === 'ALL' ? '전체' : selectedWorker}}<br>` +
       `<strong>활성 마커 수</strong> : ${{states.length}}<br>` +
+      `<strong>피킹 대상 포인트</strong> : ${{currentPickTargets.length}}개<br>` +
       `<strong>DES Conflicts</strong> : ${{totalConflicts}}회 · <strong>총 대기</strong> : ${{totalWait.toFixed(2)}}초<br>` +
       `<strong>현재 충돌 이벤트</strong> : ${{activeConflictEvents.length}}개 · <strong>충돌 피커</strong> : ${{collisionWorkers.size}}명<br>` +
       `<strong>누적 충돌 이벤트</strong> : ${{cumulativeConflictEvents.length}}개 · <strong>누적 충돌 피커</strong> : ${{cumulativeConflictPickerCount}}명<br>` +
@@ -1530,6 +1703,7 @@ def render_single_html(
       allocationInfo.textContent = allocationText;
 
       rebuildWorkers();
+      document.getElementById('metaPickTargets').textContent = `${{currentPickTargets.length}}개 포인트`;
       render();
       if (autoPlay) start();
     }} catch (error) {{
@@ -1577,6 +1751,9 @@ def render_single_html(
   playBtn.addEventListener('click', () => playing ? stop() : start());
   speedSel.addEventListener('change', () => {{ lastTs = null; }});
   workerSel.addEventListener('change', e => {{ selectedWorker = e.target.value; render(); }});
+  pickTargetsChk.addEventListener('change', () => {{
+    if (pickTargetLayer) pickTargetLayer.style.display = pickTargetsChk.checked ? '' : 'none';
+  }});
   slider.addEventListener('input', e => {{
     hasStarted = true;
     currentTime = Number(e.target.value || 0);
@@ -1621,7 +1798,7 @@ def _write_month_json(
     path = data_dir / file_name
     payload = {
         "meta": {
-            "format": "monthly-date-method-json-v6-conflict-events",
+            "format": "monthly-date-method-json-v7-pick-targets",
             "month": month_key,
             "entropy_lambda": entropy_lambda,
             "seed": seed,
@@ -1864,7 +2041,7 @@ def generate_all_dates_single_html(
     _remove_legacy_date_directories(output_html)
     monthly_data_dir = _prepare_data_directory(output_html)
 
-    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v6 actual-conflict-events")
+    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v7 actual-conflict-events + pick-targets")
     print(f"[LOAD ] Loading dataset: {data_dir}")
     bundle = load_dataset(data_dir)
     print("[GRAPH] Building deterministic warehouse graph")
@@ -1950,7 +2127,7 @@ def generate_all_dates_single_html(
 
     manifest = {
         "meta": {
-            "format": "html-manifest-monthly-json-v6-conflict-events",
+            "format": "html-manifest-monthly-json-v7-pick-targets",
             "entropy_lambda": selected_lambda,
             "seed": seed,
             "coordinate_calibration_points": transform.calibration_points,
@@ -2050,7 +2227,7 @@ def generate_single_date_html(
     )
     manifest = {
         "meta": {
-            "format": "html-manifest-monthly-json-v6-conflict-events",
+            "format": "html-manifest-monthly-json-v7-pick-targets",
             "entropy_lambda": selected_lambda,
             "seed": seed,
             "months": 1,
