@@ -212,15 +212,27 @@ def _build_macro_zone_rectangles(
     # for the warehouse-visible horizontal extent, with a small half-spacing pad.
     split_x = by_code["CC-08"][0]
     all_x = sorted(float(x) for x, _ in markers)
-    x_min = all_x[0]
-    x_max = all_x[-1]
     if len(all_x) >= 2:
         diffs = [b - a for a, b in zip(all_x, all_x[1:]) if b - a > 1e-6]
         x_pad = (min(diffs) / 2.0) if diffs else 0.0
     else:
         x_pad = 0.0
-    left_x = x_min - x_pad
-    right_x = x_max + x_pad
+
+    # Visual-only Macro-zone inset.  Keep the model's central split lines fixed
+    # (CC-08 for Left/Right and the 12/13 midpoint for Near/Far), but move only
+    # the four outside boundaries inward.  This matches the desktop viewer and
+    # keeps the dashed rectangles focused on the actual picking/storage area.
+    MACRO_ZONE_HORIZONTAL_INSET_RATIO = 0.23
+    MACRO_ZONE_VERTICAL_INSET_RATIO = 0.06
+
+    original_left_x = all_x[0] - x_pad
+    original_right_x = all_x[-1] + x_pad
+    left_x = original_left_x + (split_x - original_left_x) * MACRO_ZONE_HORIZONTAL_INSET_RATIO
+    right_x = original_right_x + (split_x - original_right_x) * MACRO_ZONE_HORIZONTAL_INSET_RATIO
+
+    # Preserve near_mid_y; shrink only the upper/lower outside boundaries.
+    outer_08_y = outer_08_y + (near_mid_y - outer_08_y) * MACRO_ZONE_VERTICAL_INSET_RATIO
+    outer_17_y = outer_17_y + (near_mid_y - outer_17_y) * MACRO_ZONE_VERTICAL_INSET_RATIO
 
     def rect(
         zone_id: str,
@@ -2271,7 +2283,7 @@ def regenerate_html_from_existing_json(
             f"{monthly_data_dir}"
         )
 
-    print("[MODE ] HTML-only rebuild from existing monthly JSON | canvas-workers-v9.1-transparent-fix")
+    print("[MODE ] HTML-only rebuild from existing monthly JSON | canvas-workers-v9.2-macrozone-inset")
     print(f"[DATA ] Existing JSON directory: {monthly_data_dir}")
     print(f"[SCAN ] Monthly JSON files: {len(json_paths)}")
 
@@ -2408,7 +2420,7 @@ def generate_all_dates_single_html(
     _remove_legacy_date_directories(output_html)
     monthly_data_dir = _prepare_data_directory(output_html)
 
-    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v9.1 canvas-workers transparent-fix + actual-conflict-events + pick-targets")
+    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v9.2 macrozone-inset + canvas-workers + actual-conflict-events + pick-targets")
     print(f"[LOAD ] Loading dataset: {data_dir}")
     bundle = load_dataset(data_dir)
     print("[GRAPH] Building deterministic warehouse graph")
