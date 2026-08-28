@@ -1308,11 +1308,9 @@ def render_single_html(
   .visual-panel {{ min-width: 0; background: #fff; border-radius: 14px; box-shadow: 0 5px 22px rgba(15,23,42,.06); padding: 10px; }}
   #svg-stack {{ position: relative; width: 100%; aspect-ratio: 3 / 2; overflow: hidden; background: #fff; border-radius: 10px; }}
   #svg-stack > svg {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
-  #overlay .marker {{ pointer-events: none; }}
-  #overlay .marker circle {{ stroke: #fff; stroke-width: 2.2; }}
-  #overlay .marker text {{ font-size: 18px; font-weight: 700; text-anchor: middle; dominant-baseline: middle; fill: #111827; pointer-events: none; }}
-  #overlay .marker.collision circle {{ fill: #ef4444 !important; stroke: #991b1b; stroke-width: 3.4; }}
-  #overlay .marker.collision text {{ fill: #fff; }}
+  #svg-stack > svg:first-of-type {{ z-index: 1; }}
+  #overlay {{ z-index: 2; }}
+  #workerCanvas {{ position: absolute; inset: 0; width: 100%; height: 100%; z-index: 3; pointer-events: none; background: transparent !important; }}
   #overlay .zone-rect {{ pointer-events: none; }}
   #overlay .zone-rect rect {{ fill-opacity: .055; stroke-width: 2.1; stroke-dasharray: 8 5; vector-effect: non-scaling-stroke; }}
   #overlay .zone-rect text {{ font-size: 15px; font-weight: 800; paint-order: stroke; stroke: rgba(255,255,255,.92); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }}
@@ -1372,6 +1370,7 @@ def render_single_html(
       <div id="svg-stack">
         {svg_transform.svg_markup}
         <svg id="overlay" viewBox="{svg_transform.view_box}" preserveAspectRatio="xMidYMid meet"></svg>
+        <canvas id="workerCanvas" aria-label="작업자 위치 애니메이션"></canvas>
       </div>
       <div class="controls">
         <button id="playBtn" type="button">▶ 재생</button>
@@ -1417,7 +1416,7 @@ def render_single_html(
       <div class="allocation" id="allocationInfo"></div>
       <div class="status loading" id="statusBox">월별 데이터를 불러오는 중입니다.</div>
       <div class="notes">
-        - 큰 원형 마커는 작업자 현재 위치입니다.<br />
+        - 큰 원형 마커는 Canvas로 렌더링되는 작업자 현재 위치입니다.<br />
         - 주황색 반투명 포인트는 당일 Picking_Wave의 피킹 대상 위치입니다. 숫자는 동일 포인트의 피킹 이벤트 수입니다.<br />
         - 점선 사각형은 인력배치 Macro-zone입니다: Z01=Left/Near, Z02=Left/Far, Z03=Right/Near, Z04=Right/Far.<br />
         - 실제 SVG support marker로 좌표를 자동 보정합니다.<br />
@@ -1442,6 +1441,9 @@ def render_single_html(
   const availabilityIndex = manifest.availability_by_date;
 
   const overlay = document.getElementById('overlay');
+  const workerCanvas = document.getElementById('workerCanvas');
+  const workerCtx = workerCanvas.getContext('2d', {{alpha: true}});
+  const svgStack = document.getElementById('svg-stack');
   const dateSel = document.getElementById('dateSel');
   const methodSel = document.getElementById('methodSel');
   const workerSel = document.getElementById('workerSel');
@@ -1511,6 +1513,92 @@ def render_single_html(
   let cumulativePickerPrefix = [0];
   let lastConflictTime = -Infinity;
   let hasExactConflictEvents = false;
+
+  // Canvas worker layer: SVG의 preserveAspectRatio="xMidYMid meet"와 같은
+  // 좌표 변환을 사용하여 Operator만 Canvas에서 고속 렌더링한다.
+  let canvasCssWidth = 1;
+  let canvasCssHeight = 1;
+  let canvasScale = 1;
+  let canvasOffsetX = 0;
+  let canvasOffsetY = 0;
+  let canvasDpr = 1;
+  let lastCanvasFrameStates = [];
+
+  function updateCanvasMetrics() {{
+    // Canvas 자체는 항상 투명 레이어로 유지한다.
+    workerCanvas.style.backgroundColor = 'transparent';
+    const rect = workerCanvas.getBoundingClientRect();
+    canvasCssWidth = Math.max(1, rect.width);
+    canvasCssHeight = Math.max(1, rect.height);
+    canvasDpr = Math.max(1, Math.min(3, Number(window.devicePixelRatio) || 1));
+
+    const targetWidth = Math.max(1, Math.round(canvasCssWidth * canvasDpr));
+    const targetHeight = Math.max(1, Math.round(canvasCssHeight * canvasDpr));
+    if (workerCanvas.width !== targetWidth || workerCanvas.height !== targetHeight) {{
+      workerCanvas.width = targetWidth;
+      workerCanvas.height = targetHeight;
+    }}
+    workerCtx.setTransform(canvasDpr, 0, 0, canvasDpr, 0, 0);
+
+    const vb = overlay.viewBox.baseVal;
+    const vbWidth = Math.max(1e-9, Number(vb.width) || 1);
+    const vbHeight = Math.max(1e-9, Number(vb.height) || 1);
+    canvasScale = Math.min(canvasCssWidth / vbWidth, canvasCssHeight / vbHeight);
+    canvasOffsetX = (canvasCssWidth - vbWidth * canvasScale) / 2 - Number(vb.x || 0) * canvasScale;
+    canvasOffsetY = (canvasCssHeight - vbHeight * canvasScale) / 2 - Number(vb.y || 0) * canvasScale;
+  }}
+
+  function clearWorkerCanvas() {{
+    if (!workerCtx) return;
+    // 일부 Chromium/Edge GPU 환경에서 desynchronized/alpha Canvas가 검게 합성되는
+    // 현상을 피하기 위해 실제 backing-store pixel 전체를 identity transform으로 지운다.
+    workerCtx.save();
+    workerCtx.setTransform(1, 0, 0, 1, 0, 0);
+    workerCtx.clearRect(0, 0, workerCanvas.width, workerCanvas.height);
+    workerCtx.restore();
+  }}
+
+  function drawWorkersCanvas(frameStates = lastCanvasFrameStates) {{
+    if (!workerCtx) return;
+    lastCanvasFrameStates = frameStates || [];
+    clearWorkerCanvas();
+    if (!lastCanvasFrameStates.length) return;
+
+    const radius = Math.max(4, 12 * canvasScale);
+    const baseStroke = Math.max(1, 2.2 * canvasScale);
+    const collisionStroke = Math.max(1.5, 3.4 * canvasScale);
+    const fontPx = Math.max(8, 18 * canvasScale);
+    workerCtx.textAlign = 'center';
+    workerCtx.textBaseline = 'middle';
+    workerCtx.font = `700 ${{fontPx.toFixed(2)}}px Arial, "Noto Sans KR", sans-serif`;
+
+    for (const state of lastCanvasFrameStates) {{
+      if (!state.visible) continue;
+      const marker = markerMap.get(state.worker.worker_id);
+      if (!marker) continue;
+      const x = canvasOffsetX + state.x * canvasScale;
+      const y = canvasOffsetY + state.y * canvasScale;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+      workerCtx.globalAlpha = state.opacity;
+      workerCtx.beginPath();
+      workerCtx.arc(x, y, radius, 0, Math.PI * 2);
+      workerCtx.fillStyle = state.colliding ? '#ef4444' : marker.baseColor;
+      workerCtx.fill();
+      workerCtx.lineWidth = state.colliding ? collisionStroke : baseStroke;
+      workerCtx.strokeStyle = state.colliding ? '#991b1b' : '#ffffff';
+      workerCtx.stroke();
+
+      workerCtx.fillStyle = state.colliding ? '#ffffff' : '#111827';
+      workerCtx.fillText(marker.label, x, y + 0.3 * canvasScale);
+    }}
+    workerCtx.globalAlpha = 1;
+  }}
+
+  function resizeWorkerCanvas() {{
+    updateCanvasMetrics();
+    drawWorkersCanvas();
+  }}
 
   function formatSeconds(value) {{
     const total = Math.max(0, Math.floor(Number(value) || 0));
@@ -1739,11 +1827,11 @@ def render_single_html(
     workerList.innerHTML = '';
     markerMap = new Map();
     workerIndices = new Map();
+    lastCanvasFrameStates = [];
 
-    // Macro-zone -> 피킹 대상 -> 작업자 순으로 그려 구역선이 가장 뒤에 놓인다.
+    // 정적 요소만 SVG에 유지한다: Macro-zone -> 피킹 대상.
     rebuildZoneLayer();
 
-    // 피킹 대상은 작업자 마커보다 먼저 그려 항상 배경 레이어에 놓는다.
     pickTargetLayer = svgNode('g');
     pickTargetLayer.setAttribute('id', 'pick-target-layer');
     overlay.appendChild(pickTargetLayer);
@@ -1780,22 +1868,19 @@ def render_single_html(
     }});
     pickTargetLayer.style.display = pickTargetsChk.checked ? '' : 'none';
 
-    const workerLayer = svgNode('g');
-    workerLayer.setAttribute('id', 'worker-marker-layer');
-    overlay.appendChild(workerLayer);
-
+    // Operator는 SVG DOM을 만들지 않고 Canvas 렌더링용 메타데이터만 준비한다.
     scenario.workers.forEach((worker, index) => {{
       workerIndices.set(worker.worker_id, 0);
       const color = colorForIndex(index);
-      const g = svgNode('g'); g.setAttribute('class', 'marker');
-      const c = svgNode('circle'); c.setAttribute('r', '12'); c.setAttribute('fill', color);
-      const t = svgNode('text'); t.textContent = shortWorkerLabel(worker.worker_id, index);
-      g.appendChild(c); g.appendChild(t); workerLayer.appendChild(g);
+      const label = shortWorkerLabel(worker.worker_id, index);
 
       const option = document.createElement('option');
-      option.value = worker.worker_id; option.textContent = worker.worker_id; workerSel.appendChild(option);
+      option.value = worker.worker_id;
+      option.textContent = worker.worker_id;
+      workerSel.appendChild(option);
 
-      const row = document.createElement('div'); row.className = 'worker-row';
+      const row = document.createElement('div');
+      row.className = 'worker-row';
       row.innerHTML = `<div class="dot" style="background:${{color}}"></div>` +
         `<div><div class="worker-name" title="${{worker.worker_id}}">${{worker.worker_id}}</div>` +
         `<div class="worker-sub">move=${{worker.movement_events}}, pick=${{worker.pick_events}}</div></div>` +
@@ -1803,11 +1888,14 @@ def render_single_html(
       workerList.appendChild(row);
       const dot = row.querySelector('.dot');
       markerMap.set(worker.worker_id, {{
-        g, c, t, dot, baseColor: color,
-        lastX: NaN, lastY: NaN, lastVisible: null, lastCollision: null, lastOpacity: null
+        dot,
+        baseColor: color,
+        label,
+        lastCollision: null
       }});
     }});
     selectedWorker = 'ALL';
+    resizeWorkerCanvas();
   }}
 
   function findSegment(worker, t) {{
@@ -1834,9 +1922,10 @@ def render_single_html(
     const nowMs = performance.now();
     const updateUi = forceUi || (nowMs - lastUiRenderMs >= UI_REFRESH_MS);
     const states = updateUi ? [] : null;
+    const frameStates = [];
 
-    // 매 프레임에는 작업자 marker의 위치만 최소 변경한다.
-    // circle(cx/cy) + text(x/y) 4개 속성 대신 부모 <g>의 transform 1개만 갱신한다.
+    // Operator 위치 계산은 기존 segment cursor를 그대로 사용하되,
+    // 화면 출력은 SVG DOM 변경 대신 Canvas 한 장을 매 프레임 다시 그린다.
     scenario.workers.forEach(worker => {{
       const seg = findSegment(worker, currentTime);
       let x = Number(seg.sx1);
@@ -1847,36 +1936,23 @@ def render_single_html(
         y = Number(seg.sy0) + (Number(seg.sy1) - Number(seg.sy0)) * r;
       }}
 
-      const marker = markerMap.get(worker.worker_id);
-      if (!marker) return;
       const visible = selectedWorker === 'ALL' || selectedWorker === worker.worker_id;
       const colliding = collisionWorkers.has(worker.worker_id);
-      const opacity = hasStarted && seg.kind === 'idle' ? '0.68' : '1';
+      const opacity = hasStarted && seg.kind === 'idle' ? 0.68 : 1;
+      const marker = markerMap.get(worker.worker_id);
 
-      if (marker.lastVisible !== visible) {{
-        marker.g.style.display = visible ? '' : 'none';
-        marker.lastVisible = visible;
-      }}
-      if (marker.lastCollision !== colliding) {{
-        marker.g.classList.toggle('collision', colliding);
+      if (marker && marker.lastCollision !== colliding) {{
         if (marker.dot) marker.dot.style.background = colliding ? '#ef4444' : marker.baseColor;
         marker.lastCollision = colliding;
       }}
-      if (marker.lastOpacity !== opacity) {{
-        marker.g.setAttribute('opacity', opacity);
-        marker.lastOpacity = opacity;
-      }}
-      if (!Number.isFinite(marker.lastX) || Math.abs(marker.lastX - x) > 0.0005 ||
-          !Number.isFinite(marker.lastY) || Math.abs(marker.lastY - y) > 0.0005) {{
-        marker.g.setAttribute('transform', `translate(${{x.toFixed(3)}} ${{y.toFixed(3)}})`);
-        marker.lastX = x;
-        marker.lastY = y;
-      }}
 
+      frameStates.push({{ worker, seg, x, y, visible, colliding, opacity }});
       if (updateUi && visible) {{
         states.push(`${{worker.worker_id}}(${{seg.kind}}${{colliding ? ', 충돌' : ''}})`);
       }}
     }});
+
+    drawWorkersCanvas(frameStates);
 
     if (!updateUi) return;
     lastUiRenderMs = nowMs;
@@ -1906,6 +1982,7 @@ def render_single_html(
       `<strong>누적 충돌 이벤트</strong> : ${{conflictState.cumulativeCount}}개 · <strong>누적 충돌 피커</strong> : ${{conflictState.cumulativePickerCount}}명<br>` +
       `<strong>현재 충돌</strong> : ${{conflictPreview}}<br>` +
       `<strong>이벤트 소스</strong> : ${{hasExactConflictEvents ? '실제 DES resource contention' : '구버전 JSON · 실제 이벤트 없음'}}<br>` +
+      `<strong>렌더링</strong> : Operator Canvas(transparent) · 정적 도면 SVG<br>` +
       `<strong>상태</strong> : ${{stateText}}`);
   }}
 
@@ -2042,6 +2119,15 @@ def render_single_html(
   }});
   dateSel.addEventListener('change', e => {{ void loadScenario(e.target.value, currentMethod, false); }});
   methodSel.addEventListener('change', e => {{ void loadScenario(currentDate, e.target.value, false); }});
+
+  // 창 크기/반응형 레이아웃 변경 시 Canvas backing store와 SVG 좌표 매핑을 동기화한다.
+  if ('ResizeObserver' in window) {{
+    const canvasResizeObserver = new ResizeObserver(() => resizeWorkerCanvas());
+    canvasResizeObserver.observe(svgStack);
+  }} else {{
+    window.addEventListener('resize', resizeWorkerCanvas, {{passive: true}});
+  }}
+  resizeWorkerCanvas();
 
   if (!dates.length) {{ setStatus('재생 가능한 날짜가 없습니다.', 'error'); }}
   else {{ void loadScenario(currentDate, currentMethod, false); }}
@@ -2185,7 +2271,7 @@ def regenerate_html_from_existing_json(
             f"{monthly_data_dir}"
         )
 
-    print("[MODE ] HTML-only rebuild from existing monthly JSON | optimized-v8")
+    print("[MODE ] HTML-only rebuild from existing monthly JSON | canvas-workers-v9.1-transparent-fix")
     print(f"[DATA ] Existing JSON directory: {monthly_data_dir}")
     print(f"[SCAN ] Monthly JSON files: {len(json_paths)}")
 
@@ -2322,7 +2408,7 @@ def generate_all_dates_single_html(
     _remove_legacy_date_directories(output_html)
     monthly_data_dir = _prepare_data_directory(output_html)
 
-    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v8 optimized-rendering + actual-conflict-events + pick-targets")
+    print("[MODE ] Lightweight HTML + lazy monthly JSON | monthly-json v9.1 canvas-workers transparent-fix + actual-conflict-events + pick-targets")
     print(f"[LOAD ] Loading dataset: {data_dir}")
     bundle = load_dataset(data_dir)
     print("[GRAPH] Building deterministic warehouse graph")
