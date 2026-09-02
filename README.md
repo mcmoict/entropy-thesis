@@ -139,6 +139,29 @@ J(n; λ) = D(n) + λR(n)
 
 ## 5. 데이터 및 실험 조건
 
+### 5.1 데이터 출처 및 라이선스
+
+본 연구에서 사용한 실제 물류센터 주문·피킹 데이터는 Mendeley Data에 공개된 다음 데이터셋을 기반으로 합니다.
+
+- **Dataset:** *Order Picking Dataset from a Warehouse of a Footwear Manufacturing Company*
+- **Contributor:** Rodrigo Furlan de Assis
+- **Repository:** [Mendeley Data](https://data.mendeley.com/datasets/pf2w725pw3/1)
+- **Version:** 1
+- **DOI:** [`10.17632/pf2w725pw3.1`](https://doi.org/10.17632/pf2w725pw3.1)
+- **License:** [Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)
+
+원 데이터셋은 실제 신발 제조기업의 Warehouse Management System(WMS)에서 수집된 자료를 기반으로 하며, 공개 과정에서 기밀성 보호를 위해 **anonymization 및 randomization**이 적용되었습니다.
+
+본 저장소의 `data/raw_original/` 디렉터리는 연구 재현성을 위해 원 데이터셋에서 제공된 자료를 보존한 영역이며, 해당 데이터 자료의 이용 및 재배포는 원 데이터셋의 **CC BY 4.0** 조건을 따릅니다.
+
+`data/raw/` 디렉터리는 본 연구의 시뮬레이션 및 분석에 사용하기 위해 원 데이터셋에서 필요한 자료를 선택하거나 연구 환경에 맞게 정리한 입력 데이터입니다. 원 데이터 및 그 가공본을 이용하거나 재배포할 경우에는 원 데이터셋의 출처, DOI 및 CC BY 4.0 라이선스를 함께 표시해야 합니다.
+
+> **Dataset attribution:** Rodrigo Furlan de Assis, *Order Picking Dataset from a Warehouse of a Footwear Manufacturing Company*, Mendeley Data, Version 1, DOI: `10.17632/pf2w725pw3.1`, licensed under CC BY 4.0.
+
+> **Note:** 위 CC BY 4.0 표기는 Mendeley 원 데이터셋 및 해당 데이터를 기반으로 한 자료에 대한 라이선스 안내입니다. 본 저장소의 독립적인 연구 코드 전체에 동일한 라이선스가 자동 적용된다는 의미는 아니며, 연구 코드의 라이선스는 별도의 `LICENSE` 파일을 추가하는 경우 그 조건을 따릅니다.
+
+### 5.2 데이터 규모 및 실험 조건
+
 현재 최종 모델 기준 주요 데이터 규모:
 
 | 항목 | 값 |
@@ -479,8 +502,10 @@ entropy-thesis/
 ├─ requirements.txt
 ├─ configs/
 ├─ data/
-│  ├─ raw/
-│  └─ processed/
+│  ├─ raw_original/             # Mendeley Data 원본 자료
+│  ├─ raw/                      # 본 연구의 시뮬레이션 입력 데이터
+│  ├─ raw_analysis/             # 원본 데이터 분석·검증 자료
+│  └─ processed/                # 전처리·생성 데이터
 │
 ├─ src/entropy_thesis/
 │  ├─ allocation/
