@@ -5,5 +5,5 @@ dependencies:
   - python=3.13
   - pip
   - pip:
-      - -e .[dev,notebook]
+      - -e .[dev,notebook,ai]
 

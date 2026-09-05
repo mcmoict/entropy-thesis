@@ -26,6 +26,10 @@ dev = [
 notebook = [
     "jupyterlab>=4.3,<5",
 ]
+ai = [
+    "scikit-learn>=1.7,<2",
+    "xgboost>=3.0,<4",
+]
 
 [project.scripts]
 entropy-thesis = "entropy_thesis.experiment:main"

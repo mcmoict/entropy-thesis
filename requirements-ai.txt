@@ -1,0 +1,2 @@
+# Phase 8 AI dependencies (installs the project plus optional AI packages)
+-e .[ai]

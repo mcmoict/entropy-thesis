@@ -2,7 +2,7 @@
 
 실제 물류센터 피킹 데이터를 기반으로 **Shannon Entropy**와 **이산 사건 시뮬레이션(Discrete-Event Simulation, DES)** 을 결합하여, 작업자 배치에 따른 **처리효율과 혼잡의 trade-off**를 분석하는 석사 논문 연구 프로젝트입니다.
 
-본 프로젝트의 실제 데이터 연구는 **Phase 1 ~ Phase 6**으로 구성되며, 최종 제안 방법은 20개 demand micro-zone의 수요 집중도를 이용해 4개 workforce macro-zone의 **정수 작업자 배치**를 최적화합니다.
+본 프로젝트의 핵심 실험은 **Phase 1 ~ Phase 6**으로 구성되며, Phase 8에서 이를 **AI-Adaptive EWA**로 확장합니다. 최종 제안 방법은 20개 demand micro-zone의 수요 집중도를 이용해 4개 workforce macro-zone의 **정수 작업자 배치**를 최적화하고, XGBoost가 날짜별 운영상황에 적합한 λ를 동적으로 선택합니다.
 
 ---
 
@@ -26,7 +26,7 @@ Entropy-based
 
 ---
 
-## 2. Phase 1 ~ Phase 6
+## 2. Phase 1 ~ Phase 6 + Phase 8 AI 확장
 
 | Phase | 내용 | 핵심 목적 |
 |---|---|---|
@@ -36,6 +36,7 @@ Entropy-based
 | **Phase 4** | Entropy 기반 정수 작업자 배치 | 목적함수 정의 및 Pareto-knee 기반 λ Calibration |
 | **Phase 5** | Frozen Holdout 검증 | Calibration에서 고정한 λ*를 독립 Holdout에 적용 |
 | **Phase 6** | Trade-off / Mechanism / Robustness | 일반화 성능, 배치 변경 메커니즘, 통계적 강건성 분석 |
+| **Phase 8** | AI-Adaptive EWA | XGBoost KPI 예측 + Fixed-EWA Flow guardrail 기반 날짜별 Adaptive λ 선택 |
 
 전체 흐름:
 
@@ -53,6 +54,8 @@ Phase 4  Entropy Integer Allocation + λ Calibration
 Phase 5  Frozen Holdout Validation
         ↓
 Phase 6  Trade-off / Mechanism / Robustness Analysis
+        ↓
+Phase 8  XGBoost KPI Prediction + Adaptive λ_t
         ↓
 Visualization (HTML / Desktop / EXE)
 ```
@@ -355,6 +358,28 @@ python -m entropy_thesis.simulation.phase6
 
 Phase 6 역시 λ를 다시 선택하지 않고 Frozen Holdout 결과를 분석합니다.
 
+### Phase 8 - AI-Adaptive EWA
+
+Phase 8 추가 package 설치:
+
+```powershell
+python -m pip install -e .[ai]
+```
+
+먼저 Calibration 데이터만으로 학습 및 내부 날짜 검증을 수행할 수 있습니다.
+
+```powershell
+python -m entropy_thesis.simulation.phase8 --train-only
+```
+
+최종 Frozen Holdout 40일까지 포함한 AI-Adaptive EWA 검증:
+
+```powershell
+python -m entropy_thesis.simulation.phase8 --data-dir data/raw
+```
+
+Phase 8은 `phase4_metadata.json`의 기존 DES 조건을 자동 상속하며, XGBoost에는 λ 숫자 자체를 직접 입력하지 않고 **λ가 생성한 후보 정수 작업자 배치와 운영상태 feature**를 입력합니다. AI가 예측한 Flow / Conflict / Wait / Congestion을 이용해 **고정 EWA(λ*=0.25)보다 예측 Flow가 나빠지지 않는 후보 중 예측 혼잡지수가 가장 낮은 λ**를 날짜별로 선택합니다.
+
 ---
 
 ## 9. 결과 디렉터리
@@ -366,6 +391,7 @@ results/
 ├─ phase4/     λ Calibration / Pareto 분석 / recommendation
 ├─ phase5/     Frozen Holdout 5방법 비교 및 paired 통계
 ├─ phase6/     Generalization / mechanism / bootstrap / Holm 분석
+├─ phase8/     XGBoost / Adaptive λ / Frozen Holdout AI-EWA 검증
 └─ figures/    Picking Animation 시각화 결과
 ```
 
@@ -632,6 +658,18 @@ entropy-thesis/
 
 ---
 
+## 12.1 Phase 8 검토용 소스 압축
+
+`.git`, `data/raw`, `dist`, 대용량 시각화 JSON을 제외하고 Phase 8 검토에 필요한 파일만 묶습니다. 프로젝트 루트의 PowerShell에서 실행합니다.
+
+```powershell
+$items=@("src","tests","docs","results/phase4","results/phase5","results/phase6","results/phase8","README.md","pyproject.toml","requirements.txt","requirements-ai.txt","requirements-lock.txt","requirements-pip.txt","environment.yml","environment-full.yml") | Where-Object { Test-Path $_ }; tar -a -c -f ("entropy-thesis_phase8_upload_" + (Get-Date -Format "yyyyMMdd_HHmm") + ".zip") $items
+```
+
+동일 명령은 `pack_phase8_upload.ps1`로도 제공됩니다.
+
+---
+
 ## 13. 상세 문서
 
 루트 README는 프로젝트 전체 안내서이며, 각 Phase의 상세 모델링·실행 옵션·출력 파일·최종 결과는 아래 문서에 분리합니다.
@@ -642,6 +680,7 @@ entropy-thesis/
 - [Phase 4 - Entropy 정수 배치 및 λ Calibration](docs/phases/README_PHASE4.md)
 - [Phase 5 - Frozen Holdout Validation](docs/phases/README_PHASE5.md)
 - [Phase 6 - Trade-off / Mechanism / Robustness](docs/phases/README_PHASE6.md)
+- [Phase 8 - AI-Adaptive Entropy Workforce Allocation](docs/phases/README_PHASE8.md)
 - [Picking Animation Visualization](src/entropy_thesis/visualization/README.md)
 
 문서 관리 원칙은 **`README.md = 전체 안내`, `docs/phases = 연구 단계별 상세`, `visualization/README.md = 시각화 실행`**입니다. `MODEL_REVISION_*`, `PHASE4_*`, `PHASE6_RESULTS_*`, `README_PHASE*_Old.md`와 같은 중간 문서는 최종 Phase 문서에 내용을 통합한 뒤 제거했습니다.
@@ -658,7 +697,9 @@ entropy-thesis/
 4. Phase 5에서 λ를 다시 선택하지 않습니다.
 5. Holdout 날짜를 다시 샘플링하지 않습니다.
 6. Phase 6에서도 λ 또는 Holdout을 재조정하지 않습니다.
-7. Entropy와 Volume의 배치가 달라진 날짜만을 이용한 분석은 **메커니즘 설명용**이며 전체 Holdout 통계를 대체하지 않습니다.
+7. Phase 8의 AI 학습은 Phase 4 Calibration 날짜만 사용하며, 동일 날짜의 λ 후보가 Train/Validation에 동시에 들어가지 않도록 날짜 단위 chronological split을 사용합니다.
+8. Phase 8의 Frozen Holdout에서 Adaptive λ 선택은 XGBoost 예측 KPI만 사용하며, 선택이 끝난 뒤 선택된 정수배치만 실제 DES로 평가합니다. 기존 Phase 5와 동일한 배치는 저장된 실제 결과를 재사용합니다.
+9. Entropy와 Volume의 배치가 달라진 날짜만을 이용한 분석은 **메커니즘 설명용**이며 전체 Holdout 통계를 대체하지 않습니다.
 
 현재 모델의 congestion은 통로 및 pick node의 capacity-based contention을 표현합니다. 실제 사람 간 회피행동, 안전거리, 연속 보행밀도, 작업자별 보행속도 차이 등의 물리적 행동까지 직접 예측하는 모델은 아닙니다.
 
@@ -691,6 +732,15 @@ python -m entropy_thesis.simulation.phase5 --data-dir data/raw
 
 # Phase 6 Final Analysis
 python -m entropy_thesis.simulation.phase6
+
+# Phase 8 AI dependencies
+python -m pip install -e .[ai]
+
+# Phase 8 quick training / internal validation
+python -m entropy_thesis.simulation.phase8 --train-only
+
+# Phase 8 final frozen-holdout evaluation
+python -m entropy_thesis.simulation.phase8 --data-dir data/raw
 
 # Visualization JSON / HTML
 python -m entropy_thesis.visualization.picking_animation_actual --all-dates
