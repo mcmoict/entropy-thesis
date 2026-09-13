@@ -378,6 +378,25 @@ python -m entropy_thesis.simulation.phase8 --train-only
 python -m entropy_thesis.simulation.phase8 --data-dir data/raw
 ```
 
+Random Forest 비교 실험은 기존 XGBoost Phase 8을 보존한 채 별도 결과 디렉토리로 실행합니다.
+
+```powershell
+# 빠른 내부검증
+python -m entropy_thesis.simulation.phase8_rf --train-only
+
+# Frozen Holdout 선택까지만 확인
+python -m entropy_thesis.simulation.phase8_rf --selection-only
+
+# 최종 Random Forest Adaptive EWA
+python -m entropy_thesis.simulation.phase8_rf --data-dir data/raw
+```
+
+동일 기능은 통합 Phase 8 모듈에서도 실행할 수 있습니다.
+
+```powershell
+python -m entropy_thesis.simulation.phase8 --ai-model random_forest --output-dir results/phase8_rf --data-dir data/raw
+```
+
 Phase 8은 `phase4_metadata.json`의 기존 DES 조건을 자동 상속하며, XGBoost에는 λ 숫자 자체를 직접 입력하지 않고 **λ가 생성한 후보 정수 작업자 배치와 운영상태 feature**를 입력합니다. AI가 예측한 Flow / Conflict / Wait / Congestion을 이용해 **고정 EWA(λ*=0.25)보다 예측 Flow가 나빠지지 않는 후보 중 예측 혼잡지수가 가장 낮은 λ**를 날짜별로 선택합니다.
 
 ---
@@ -681,6 +700,7 @@ $items=@("src","tests","docs","results/phase4","results/phase5","results/phase6"
 - [Phase 5 - Frozen Holdout Validation](docs/phases/README_PHASE5.md)
 - [Phase 6 - Trade-off / Mechanism / Robustness](docs/phases/README_PHASE6.md)
 - [Phase 8 - AI-Adaptive Entropy Workforce Allocation](docs/phases/README_PHASE8.md)
+- [Phase 8-RF - Random Forest Adaptive EWA 비교 실험](docs/phases/README_PHASE8_RF.md)
 - [Picking Animation Visualization](src/entropy_thesis/visualization/README.md)
 
 문서 관리 원칙은 **`README.md = 전체 안내`, `docs/phases = 연구 단계별 상세`, `visualization/README.md = 시각화 실행`**입니다. `MODEL_REVISION_*`, `PHASE4_*`, `PHASE6_RESULTS_*`, `README_PHASE*_Old.md`와 같은 중간 문서는 최종 Phase 문서에 내용을 통합한 뒤 제거했습니다.

@@ -8,6 +8,7 @@ from entropy_thesis.simulation.phase8 import (
     adaptive_selection_records,
     build_phase8_feature_dataset,
     chronological_date_split,
+    fit_ai_models,
 )
 
 
@@ -96,3 +97,18 @@ def test_adaptive_selection_uses_predictions_but_evaluates_actual_rows() -> None
     assert selection.iloc[0]["fixed_entropy_weight"] == pytest.approx(0.25)
     assert selection.iloc[0]["ai_mean_flow_time_seconds"] in {100.0, 105.0}
     assert "oracle_entropy_weight" in selection.columns
+
+
+def test_random_forest_can_be_used_as_phase8_prediction_model() -> None:
+    daily, allocations = _frames()
+    frame, features = build_phase8_feature_dataset(daily, allocations)
+    train_dates, _ = chronological_date_split(frame, validation_ratio=0.25)
+    models = fit_ai_models(
+        frame,
+        features,
+        model_name="random_forest",
+        dates=train_dates,
+        seed=42,
+    )
+    assert set(models) == set(TARGET_METRICS)
+    assert all(type(model).__name__ == "RandomForestRegressor" for model in models.values())

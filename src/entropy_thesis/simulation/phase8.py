@@ -31,7 +31,8 @@ from .progress import ConsoleProgress, format_duration
 from .warehouse import WarehouseGraph
 
 
-PHASE8_REVISION = "phase8-ai-adaptive-ewa-xgboost-v1"
+PHASE8_REVISION = "phase8-ai-adaptive-ewa-multimodel-v2"
+SUPPORTED_AI_MODELS: tuple[str, ...] = ("xgboost", "random_forest")
 DEFAULT_VALIDATION_RATIO = 0.20
 DEFAULT_SEED = 42
 
@@ -259,6 +260,37 @@ def _xgb_model(*, seed: int = DEFAULT_SEED):
     )
 
 
+def _random_forest_model(*, seed: int = DEFAULT_SEED):
+    deps = _require_ai_dependencies()
+    RandomForestRegressor = deps["RandomForestRegressor"]
+    return RandomForestRegressor(
+        n_estimators=400,
+        min_samples_leaf=2,
+        max_features=0.8,
+        random_state=seed,
+        n_jobs=-1,
+    )
+
+
+def _ai_model_factory(model_name: str, *, seed: int = DEFAULT_SEED):
+    normalized = str(model_name).strip().lower()
+    if normalized == "xgboost":
+        return _xgb_model(seed=seed)
+    if normalized == "random_forest":
+        return _random_forest_model(seed=seed)
+    raise ValueError(
+        f"지원하지 않는 Phase 8 AI 모델입니다: {model_name}. "
+        f"지원 모델={', '.join(SUPPORTED_AI_MODELS)}"
+    )
+
+
+def _ai_model_display_name(model_name: str) -> str:
+    return {
+        "xgboost": "XGBoost",
+        "random_forest": "Random Forest",
+    }.get(str(model_name).strip().lower(), str(model_name))
+
+
 def benchmark_models(
     frame: pd.DataFrame,
     feature_columns: tuple[str, ...],
@@ -318,10 +350,11 @@ def benchmark_models(
     return pd.DataFrame(records)
 
 
-def fit_xgboost_models(
+def fit_ai_models(
     frame: pd.DataFrame,
     feature_columns: tuple[str, ...],
     *,
+    model_name: str = "xgboost",
     dates: Iterable[str] | None = None,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, object]:
@@ -330,13 +363,26 @@ def fit_xgboost_models(
         date_set = set(str(value) for value in dates)
         selected = frame[frame["selected_date"].astype(str).isin(date_set)]
     if selected.empty:
-        raise ValueError("XGBoost 학습 데이터가 비어 있습니다.")
+        raise ValueError(f"{_ai_model_display_name(model_name)} 학습 데이터가 비어 있습니다.")
     models: dict[str, object] = {}
     for target in TARGET_METRICS:
-        model = _xgb_model(seed=seed)
+        model = _ai_model_factory(model_name, seed=seed)
         model.fit(selected[list(feature_columns)], selected[target])
         models[target] = model
     return models
+
+
+def fit_xgboost_models(
+    frame: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    *,
+    dates: Iterable[str] | None = None,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, object]:
+    """Backward-compatible wrapper for the original Phase-8 XGBoost path."""
+    return fit_ai_models(
+        frame, feature_columns, model_name="xgboost", dates=dates, seed=seed
+    )
 
 
 def predict_candidate_metrics(
@@ -709,32 +755,20 @@ def run_selected_holdout(
         ("selected_date", "method", "worker_counts", *REPORT_METRICS),
         source="phase5_daily_summary.csv",
     )
-    dataset = load_dataset(data_dir)
-    warehouse = WarehouseGraph.build(
-        dataset.storage_locations,
-        dataset.support_points,
-        deterministic_order=True,
-    )
-    audit_picking_locations(warehouse, dataset.picking_lists)
-    zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
-    profiles, selected_by_date = extract_phase4_date_profiles(
-        warehouse,
-        dataset.picking_lists,
-        zones,
-        min_lists_per_date=min_lists_per_date,
-        max_lists=max_lists,
-        total_workers=total_workers,
-        volume_basis=volume_basis,
-        minimum_per_active_zone=minimum_per_active_zone,
-    )
-    profile_map = {profile.selected_date: profile for profile in profiles}
+    # Raw data / DES objects are loaded lazily. If every AI-selected integer
+    # allocation is identical to an existing Phase-5 fixed/volume allocation,
+    # the final comparison can be completed entirely by reusing Phase-5 results.
+    # This is common for tree models because different lambda values may collapse
+    # to the same discrete worker vector.
+    warehouse: WarehouseGraph | None = None
+    zones = None
+    selected_by_date = None
+    profile_map = None
 
     records: list[dict[str, object]] = []
     for index, selected in selection.sort_values("selected_date").iterrows():
         selected_date_text = str(selected["selected_date"])
         selected_date = date.fromisoformat(selected_date_text)
-        if selected_date not in selected_by_date or not profile_map[selected_date].eligible:
-            raise ValueError(f"Holdout selected date를 실행할 수 없습니다: {selected_date_text}")
 
         candidate_match = candidate_daily[
             candidate_daily["selected_date"].astype(str).eq(selected_date_text)
@@ -775,6 +809,31 @@ def run_selected_holdout(
             summary_record = volume.to_dict()
         else:
             source = "phase8_selected_des"
+            if warehouse is None:
+                dataset = load_dataset(data_dir)
+                warehouse = WarehouseGraph.build(
+                    dataset.storage_locations,
+                    dataset.support_points,
+                    deterministic_order=True,
+                )
+                audit_picking_locations(warehouse, dataset.picking_lists)
+                zones = build_aisle_zones(warehouse, number_of_zones=number_of_zones)
+                profiles, selected_by_date = extract_phase4_date_profiles(
+                    warehouse,
+                    dataset.picking_lists,
+                    zones,
+                    min_lists_per_date=min_lists_per_date,
+                    max_lists=max_lists,
+                    total_workers=total_workers,
+                    volume_basis=volume_basis,
+                    minimum_per_active_zone=minimum_per_active_zone,
+                )
+                profile_map = {profile.selected_date: profile for profile in profiles}
+            assert selected_by_date is not None
+            assert profile_map is not None
+            assert zones is not None
+            if selected_date not in selected_by_date or not profile_map[selected_date].eligible:
+                raise ValueError(f"Holdout selected date를 실행할 수 없습니다: {selected_date_text}")
             selected_lists = selected_by_date[selected_date]
             assignments = classify_picking_lists_by_zone(warehouse, selected_lists, zones)
             demand_entropy, _ = calculate_demand_entropy(warehouse, selected_lists)
@@ -841,11 +900,31 @@ def summarize_holdout_selected(selected_actual: pd.DataFrame) -> pd.DataFrame:
             )
     return pd.DataFrame(records)
 
-def save_xgboost_models(models: dict[str, object], output_dir: Path) -> None:
+def save_ai_models(
+    models: dict[str, object],
+    output_dir: Path,
+    *,
+    model_name: str,
+) -> None:
     model_dir = output_dir / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
-    for target, model in models.items():
-        model.save_model(model_dir / f"xgboost_{target}.json")
+    normalized = str(model_name).strip().lower()
+    if normalized == "xgboost":
+        for target, model in models.items():
+            model.save_model(model_dir / f"xgboost_{target}.json")
+        return
+    if normalized == "random_forest":
+        import joblib
+
+        for target, model in models.items():
+            joblib.dump(model, model_dir / f"random_forest_{target}.joblib")
+        return
+    raise ValueError(f"지원하지 않는 모델 저장 형식입니다: {model_name}")
+
+
+def save_xgboost_models(models: dict[str, object], output_dir: Path) -> None:
+    """Backward-compatible wrapper for the original Phase-8 XGBoost path."""
+    save_ai_models(models, output_dir, model_name="xgboost")
 
 
 def run_phase8(
@@ -856,6 +935,7 @@ def run_phase8(
     output_dir: str | Path = Path("results/phase8"),
     train_only: bool = False,
     selection_only: bool = False,
+    ai_model: str = "xgboost",
     validation_ratio: float = DEFAULT_VALIDATION_RATIO,
     ai_seed: int = DEFAULT_SEED,
     progress: ConsoleProgress | None = None,
@@ -864,6 +944,13 @@ def run_phase8(
     phase5_dir = Path(phase5_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    ai_model = str(ai_model).strip().lower()
+    if ai_model not in SUPPORTED_AI_MODELS:
+        raise ValueError(
+            f"지원하지 않는 Phase 8 AI 모델입니다: {ai_model}. "
+            f"지원 모델={', '.join(SUPPORTED_AI_MODELS)}"
+        )
+    ai_model_display = _ai_model_display_name(ai_model)
 
     recommendation = _read_json(phase4_dir / "phase4_recommendation.json")
     phase4_metadata = _read_json(phase4_dir / "phase4_metadata.json")
@@ -941,10 +1028,11 @@ def run_phase8(
     benchmark.to_csv(output_dir / "phase8_model_benchmark.csv", index=False)
 
     if progress is not None:
-        progress.report(0.18, "Phase 8B | Internal date validation of adaptive lambda selection")
-    internal_models = fit_xgboost_models(
+        progress.report(0.18, f"Phase 8B | Internal date validation with {ai_model_display}")
+    internal_models = fit_ai_models(
         feature_frame,
         feature_columns,
+        model_name=ai_model,
         dates=internal_train_dates,
         seed=ai_seed,
     )
@@ -967,9 +1055,11 @@ def run_phase8(
     )
 
     if progress is not None:
-        progress.report(0.29, "Phase 8B | Refitting final XGBoost models on all calibration dates")
-    final_models = fit_xgboost_models(feature_frame, feature_columns, seed=ai_seed)
-    save_xgboost_models(final_models, output_dir)
+        progress.report(0.29, f"Phase 8B | Refitting final {ai_model_display} models on all calibration dates")
+    final_models = fit_ai_models(
+        feature_frame, feature_columns, model_name=ai_model, seed=ai_seed
+    )
+    save_ai_models(final_models, output_dir, model_name=ai_model)
     importance = feature_importance_records(final_models, feature_columns)
     importance.to_csv(output_dir / "phase8_feature_importance.csv", index=False)
 
@@ -979,13 +1069,14 @@ def run_phase8(
         "phase4_model_revision": recommendation.get("model_revision"),
         "purpose": "AI-adaptive lambda selection for Entropy-based Workforce Allocation with a fixed-EWA flow guardrail",
         "fixed_ewa_lambda": fixed_lambda,
-        "ai_model": "XGBoost regression (one model per predicted KPI)",
+        "ai_model": f"{ai_model_display} regression (one model per predicted KPI)",
+        "ai_model_key": ai_model,
         "model_benchmarks": ["linear_regression", "random_forest", "xgboost"],
         "target_metrics": list(TARGET_METRICS),
         "feature_columns": list(feature_columns),
         "lambda_is_model_feature": False,
         "lambda_role": (
-            "lambda generates an integer EWA candidate allocation; XGBoost predicts DES KPIs from "
+            f"lambda generates an integer EWA candidate allocation; {ai_model_display} predicts DES KPIs from "
             "the operating condition and candidate allocation. Phase 8 then minimizes predicted "
             "congestion subject to predicted Flow Time not exceeding the fixed EWA candidate"
         ),
@@ -1170,6 +1261,12 @@ def main() -> None:
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
     parser.add_argument("--phase5-dir", type=Path, default=Path("results/phase5"))
     parser.add_argument("--output-dir", type=Path, default=Path("results/phase8"))
+    parser.add_argument(
+        "--ai-model",
+        choices=SUPPORTED_AI_MODELS,
+        default="xgboost",
+        help="Adaptive lambda KPI 예측 모델 (기본: xgboost)",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--train-only",
@@ -1194,6 +1291,7 @@ def main() -> None:
         output_dir=args.output_dir,
         train_only=args.train_only,
         selection_only=args.selection_only,
+        ai_model=args.ai_model,
         validation_ratio=args.validation_ratio,
         ai_seed=args.ai_seed,
         progress=progress,
@@ -1208,7 +1306,7 @@ def main() -> None:
     print(f"Calibration dates       : {len(metadata['calibration_dates']):,}")
     print(f"Internal train dates    : {len(metadata['internal_train_dates']):,}")
     print(f"Internal validation     : {len(metadata['internal_validation_dates']):,}")
-    print("AI model                : XGBoost")
+    print(f"AI model                : {_ai_model_display_name(str(metadata.get('ai_model_key', args.ai_model)))}")
     print("Lambda direct feature   : no (candidate allocation features only)")
     print("DES parameters          : frozen from Phase 4 metadata")
     print()
