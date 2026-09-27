@@ -29,6 +29,8 @@ notebook = [
 ai = [
     "scikit-learn>=1.7,<2",
     "xgboost>=3.0,<4",
+    "lightgbm>=4.6,<5",
+    "catboost>=1.2,<2",
 ]
 
 [project.scripts]

@@ -776,3 +776,35 @@ python -m entropy_thesis.visualization.picking_animation_desktop
 현재 최종 실험에서 Entropy 기반 작업자 배치는 Volume Proportional 대비 Holdout 평균 **Mean Flow Time이 약 2.84% 증가**했지만, **Conflicts는 약 4.50%, Congestion Wait는 약 11.31%, Congestion Ratio는 약 5.85% 감소**했습니다.
 
 이는 제안 방법이 단순히 가장 빠른 작업자 배치를 찾는 것이 아니라, **수요량과 수요의 공간적 집중도를 함께 고려하여 처리효율과 혼잡 사이의 균형점을 선택하는 작업자 배치 정책**임을 보여줍니다.
+
+## Phase 8 - 3대 Boosting 모델 비교
+
+교수 피드백 반영을 위해 동일한 chronological date split과 동일한 Phase 8 feature/target 조건에서
+**XGBoost / LightGBM / CatBoost**를 비교합니다. Linear Regression과 Random Forest는 기준 모델로 함께 유지합니다.
+
+AI 의존성 설치:
+
+```powershell
+python -m pip install -e ".[ai]"
+```
+
+예측 성능만 빠르게 비교:
+
+```powershell
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw --train-only
+```
+
+Holdout 후보 선택까지 비교(DES 재실행 없음):
+
+```powershell
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw --selection-only
+```
+
+세 Boosting 모델의 Adaptive EWA를 Holdout DES까지 최종 비교:
+
+```powershell
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw
+```
+
+주요 통합 결과는 `results/phase8_boosting/boosting_model_benchmark.csv`,
+`boosting_only_benchmark.csv`, `boosting_holdout_comparison.csv`에 저장됩니다.

@@ -32,7 +32,7 @@ from .warehouse import WarehouseGraph
 
 
 PHASE8_REVISION = "phase8-ai-adaptive-ewa-multimodel-v2"
-SUPPORTED_AI_MODELS: tuple[str, ...] = ("xgboost", "random_forest")
+SUPPORTED_AI_MODELS: tuple[str, ...] = ("xgboost", "lightgbm", "catboost", "random_forest")
 DEFAULT_VALIDATION_RATIO = 0.20
 DEFAULT_SEED = 42
 
@@ -76,6 +76,8 @@ def _require_ai_dependencies():
         from sklearn.linear_model import LinearRegression
         from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
         from xgboost import XGBRegressor
+        from lightgbm import LGBMRegressor
+        from catboost import CatBoostRegressor
     except ImportError as exc:  # pragma: no cover - depends on local environment
         raise Phase8DependencyError(
             "Phase 8 AI 의존성이 없습니다. 프로젝트 루트에서 "
@@ -85,6 +87,8 @@ def _require_ai_dependencies():
         "LinearRegression": LinearRegression,
         "RandomForestRegressor": RandomForestRegressor,
         "XGBRegressor": XGBRegressor,
+        "LGBMRegressor": LGBMRegressor,
+        "CatBoostRegressor": CatBoostRegressor,
         "mean_absolute_error": mean_absolute_error,
         "mean_squared_error": mean_squared_error,
         "r2_score": r2_score,
@@ -260,6 +264,40 @@ def _xgb_model(*, seed: int = DEFAULT_SEED):
     )
 
 
+def _lightgbm_model(*, seed: int = DEFAULT_SEED):
+    deps = _require_ai_dependencies()
+    LGBMRegressor = deps["LGBMRegressor"]
+    return LGBMRegressor(
+        n_estimators=500,
+        max_depth=3,
+        num_leaves=15,
+        learning_rate=0.03,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        reg_alpha=0.05,
+        reg_lambda=1.0,
+        random_state=seed,
+        n_jobs=4,
+        verbosity=-1,
+    )
+
+
+def _catboost_model(*, seed: int = DEFAULT_SEED):
+    deps = _require_ai_dependencies()
+    CatBoostRegressor = deps["CatBoostRegressor"]
+    return CatBoostRegressor(
+        iterations=500,
+        depth=3,
+        learning_rate=0.03,
+        l2_leaf_reg=3.0,
+        loss_function="RMSE",
+        random_seed=seed,
+        verbose=False,
+        thread_count=4,
+        allow_writing_files=False,
+    )
+
+
 def _random_forest_model(*, seed: int = DEFAULT_SEED):
     deps = _require_ai_dependencies()
     RandomForestRegressor = deps["RandomForestRegressor"]
@@ -276,6 +314,10 @@ def _ai_model_factory(model_name: str, *, seed: int = DEFAULT_SEED):
     normalized = str(model_name).strip().lower()
     if normalized == "xgboost":
         return _xgb_model(seed=seed)
+    if normalized == "lightgbm":
+        return _lightgbm_model(seed=seed)
+    if normalized == "catboost":
+        return _catboost_model(seed=seed)
     if normalized == "random_forest":
         return _random_forest_model(seed=seed)
     raise ValueError(
@@ -287,6 +329,8 @@ def _ai_model_factory(model_name: str, *, seed: int = DEFAULT_SEED):
 def _ai_model_display_name(model_name: str) -> str:
     return {
         "xgboost": "XGBoost",
+        "lightgbm": "LightGBM",
+        "catboost": "CatBoost",
         "random_forest": "Random Forest",
     }.get(str(model_name).strip().lower(), str(model_name))
 
@@ -327,6 +371,8 @@ def benchmark_models(
                 n_jobs=-1,
             ),
             "xgboost": lambda: _xgb_model(seed=seed),
+            "lightgbm": lambda: _lightgbm_model(seed=seed),
+            "catboost": lambda: _catboost_model(seed=seed),
         }
         for model_name, factory in model_factories.items():
             model = factory()
@@ -913,11 +959,11 @@ def save_ai_models(
         for target, model in models.items():
             model.save_model(model_dir / f"xgboost_{target}.json")
         return
-    if normalized == "random_forest":
+    if normalized in {"random_forest", "lightgbm", "catboost"}:
         import joblib
 
         for target, model in models.items():
-            joblib.dump(model, model_dir / f"random_forest_{target}.joblib")
+            joblib.dump(model, model_dir / f"{normalized}_{target}.joblib")
         return
     raise ValueError(f"지원하지 않는 모델 저장 형식입니다: {model_name}")
 
@@ -1017,7 +1063,7 @@ def run_phase8(
         feature_frame, validation_ratio=validation_ratio
     )
     if progress is not None:
-        progress.report(0.10, "Phase 8A | Benchmarking Linear / RF / XGBoost by chronological dates")
+        progress.report(0.10, "Phase 8A | Benchmarking Linear / RF / XGBoost / LightGBM / CatBoost by chronological dates")
     benchmark = benchmark_models(
         feature_frame,
         feature_columns,
@@ -1071,7 +1117,7 @@ def run_phase8(
         "fixed_ewa_lambda": fixed_lambda,
         "ai_model": f"{ai_model_display} regression (one model per predicted KPI)",
         "ai_model_key": ai_model,
-        "model_benchmarks": ["linear_regression", "random_forest", "xgboost"],
+        "model_benchmarks": ["linear_regression", "random_forest", "xgboost", "lightgbm", "catboost"],
         "target_metrics": list(TARGET_METRICS),
         "feature_columns": list(feature_columns),
         "lambda_is_model_feature": False,

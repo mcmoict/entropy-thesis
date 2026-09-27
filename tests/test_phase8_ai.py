@@ -112,3 +112,18 @@ def test_random_forest_can_be_used_as_phase8_prediction_model() -> None:
     )
     assert set(models) == set(TARGET_METRICS)
     assert all(type(model).__name__ == "RandomForestRegressor" for model in models.values())
+
+@pytest.mark.parametrize(
+    ("model_name", "class_name"),
+    [
+        ("lightgbm", "LGBMRegressor"),
+        ("catboost", "CatBoostRegressor"),
+    ],
+)
+def test_boosting_models_can_be_used_as_phase8_prediction_model(model_name: str, class_name: str) -> None:
+    daily, allocations = _frames()
+    frame, features = build_phase8_feature_dataset(daily, allocations)
+    train_dates, _ = chronological_date_split(frame, validation_ratio=0.25)
+    models = fit_ai_models(frame, features, model_name=model_name, dates=train_dates, seed=42)
+    assert set(models) == set(TARGET_METRICS)
+    assert all(type(model).__name__ == class_name for model in models.values())
