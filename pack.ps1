@@ -30,6 +30,8 @@ $includeDirs = @(
     "results/phase5",
     "results/phase6",
     "results/phase8",
+    "results/phase8_boosting",
+    "results/phase8_rf",
     "src",
     "tests"
 )
