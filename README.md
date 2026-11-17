@@ -37,6 +37,8 @@ Entropy-based
 | **Phase 5** | Frozen Holdout 검증 | Calibration에서 고정한 λ*를 독립 Holdout에 적용 |
 | **Phase 6** | Trade-off / Mechanism / Robustness | 일반화 성능, 배치 변경 메커니즘, 통계적 강건성 분석 |
 | **Phase 8** | AI-Adaptive EWA | XGBoost KPI 예측 + Fixed-EWA Flow guardrail 기반 날짜별 Adaptive λ 선택 |
+| **Phase 8-RF** | Random Forest Adaptive EWA | Random Forest로 XGBoost와 동일 조건 비교 평가 |
+| **Phase 8-Boosting** | Boosting 모델 벤치마크 | XGBoost / LightGBM / CatBoost 세 부스팅 모델 비교 |
 
 전체 흐름:
 
@@ -366,6 +368,8 @@ Phase 8 추가 package 설치:
 python -m pip install -e .[ai]
 ```
 
+#### XGBoost (기본 AI-Adaptive EWA)
+
 먼저 Calibration 데이터만으로 학습 및 내부 날짜 검증을 수행할 수 있습니다.
 
 ```powershell
@@ -378,7 +382,9 @@ python -m entropy_thesis.simulation.phase8 --train-only
 python -m entropy_thesis.simulation.phase8 --data-dir data/raw
 ```
 
-Random Forest 비교 실험은 기존 XGBoost Phase 8을 보존한 채 별도 결과 디렉토리로 실행합니다.
+#### Random Forest Adaptive EWA 비교
+
+Random Forest를 사용한 대체 AI 모델 비교 (동일 chronological split, 동일 feature):
 
 ```powershell
 # 빠른 내부검증
@@ -391,13 +397,30 @@ python -m entropy_thesis.simulation.phase8_rf --selection-only
 python -m entropy_thesis.simulation.phase8_rf --data-dir data/raw
 ```
 
-동일 기능은 통합 Phase 8 모듈에서도 실행할 수 있습니다.
+또는 통합 Phase 8 모듈에서도 실행할 수 있습니다.
 
 ```powershell
 python -m entropy_thesis.simulation.phase8 --ai-model random_forest --output-dir results/phase8_rf --data-dir data/raw
 ```
 
-Phase 8은 `phase4_metadata.json`의 기존 DES 조건을 자동 상속하며, XGBoost에는 λ 숫자 자체를 직접 입력하지 않고 **λ가 생성한 후보 정수 작업자 배치와 운영상태 feature**를 입력합니다. AI가 예측한 Flow / Conflict / Wait / Congestion을 이용해 **고정 EWA(λ*=0.25)보다 예측 Flow가 나빠지지 않는 후보 중 예측 혼잡지수가 가장 낮은 λ**를 날짜별로 선택합니다.
+#### Boosting 모델 벤치마크 (XGBoost / LightGBM / CatBoost)
+
+세 부스팅 모델의 KPI 예측 성능과 Holdout 의사결정을 함께 비교합니다.
+
+```powershell
+# 예측 성능만 빠르게 비교
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw --train-only
+
+# Holdout 후보 선택까지만 비교 (DES 재실행 없음)
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw --selection-only
+
+# 세 Boosting 모델의 Adaptive EWA를 Holdout DES까지 최종 비교
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw
+```
+
+---
+
+**Phase 8 AI-Adaptive EWA의 핵심:** λ 숫자 자체를 직접 입력하지 않고 **λ가 생성한 후보 정수 작업자 배치와 운영상태 feature**를 입력합니다. AI가 예측한 Flow / Conflict / Wait / Congestion을 이용해 **고정 EWA(λ*=0.25)보다 예측 Flow가 나빠지지 않는 후보 중 예측 혼잡지수가 가장 낮은 λ**를 날짜별로 선택합니다.
 
 ---
 
@@ -405,13 +428,15 @@ Phase 8은 `phase4_metadata.json`의 기존 DES 조건을 자동 상속하며, X
 
 ```text
 results/
-├─ phase2/     Observed Baseline DES 결과
-├─ phase3/     Random / Equal / Volume 비교 결과
-├─ phase4/     λ Calibration / Pareto 분석 / recommendation
-├─ phase5/     Frozen Holdout 5방법 비교 및 paired 통계
-├─ phase6/     Generalization / mechanism / bootstrap / Holm 분석
-├─ phase8/     XGBoost / Adaptive λ / Frozen Holdout AI-EWA 검증
-└─ figures/    Picking Animation 시각화 결과
+├─ phase2/           Observed Baseline DES 결과
+├─ phase3/           Random / Equal / Volume 비교 결과
+├─ phase4/           λ Calibration / Pareto 분석 / recommendation
+├─ phase5/           Frozen Holdout 5방법 비교 및 paired 통계
+├─ phase6/           Generalization / mechanism / bootstrap / Holm 분석
+├─ phase8/           XGBoost Adaptive EWA 결과 및 모델 저장
+├─ phase8_rf/        Random Forest Adaptive EWA 비교 결과
+├─ phase8_boosting/  XGBoost / LightGBM / CatBoost 벤치마크 결과
+└─ figures/          Picking Animation 시각화 결과
 ```
 
 대표 결과 파일:
@@ -701,6 +726,7 @@ $items=@("src","tests","docs","results/phase4","results/phase5","results/phase6"
 - [Phase 6 - Trade-off / Mechanism / Robustness](docs/phases/README_PHASE6.md)
 - [Phase 8 - AI-Adaptive Entropy Workforce Allocation](docs/phases/README_PHASE8.md)
 - [Phase 8-RF - Random Forest Adaptive EWA 비교 실험](docs/phases/README_PHASE8_RF.md)
+- [Phase 8-Boosting - 부스팅 모델 벤치마크](docs/phases/README_PHASE8_BOOSTING.md)
 - [Picking Animation Visualization](src/entropy_thesis/visualization/README.md)
 
 문서 관리 원칙은 **`README.md = 전체 안내`, `docs/phases = 연구 단계별 상세`, `visualization/README.md = 시각화 실행`**입니다. `MODEL_REVISION_*`, `PHASE4_*`, `PHASE6_RESULTS_*`, `README_PHASE*_Old.md`와 같은 중간 문서는 최종 Phase 문서에 내용을 통합한 뒤 제거했습니다.
@@ -756,11 +782,17 @@ python -m entropy_thesis.simulation.phase6
 # Phase 8 AI dependencies
 python -m pip install -e .[ai]
 
-# Phase 8 quick training / internal validation
+# Phase 8 (XGBoost) quick training / internal validation
 python -m entropy_thesis.simulation.phase8 --train-only
 
-# Phase 8 final frozen-holdout evaluation
+# Phase 8 (XGBoost) final frozen-holdout evaluation
 python -m entropy_thesis.simulation.phase8 --data-dir data/raw
+
+# Phase 8-RF (Random Forest) comparison
+python -m entropy_thesis.simulation.phase8_rf --data-dir data/raw
+
+# Phase 8-Boosting (XGBoost / LightGBM / CatBoost) benchmark
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw
 
 # Visualization JSON / HTML
 python -m entropy_thesis.visualization.picking_animation_actual --all-dates

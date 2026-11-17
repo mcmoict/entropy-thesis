@@ -22,8 +22,6 @@ Frozen Holdout 비교
 
 XGBoost와 Random Forest 사이에서 바뀌는 것은 **KPI 예측기**뿐이며, EWA 수식·λ 후보·작업자 정수배치 생성·평가 기준은 바뀌지 않습니다.
 
-## 2. Random Forest 설정
-
 각 KPI별로 독립적인 회귀 모델 1개를 학습합니다.
 
 - `n_estimators = 400`
@@ -140,3 +138,18 @@ Phase 5 Volume과 동일한 배치    :  0일
 이번 비교에서는 “XGBoost가 항상 예측 정확도가 가장 높다”라고 주장하지 않습니다. Random Forest는 Congestion Ratio 예측에서는 더 좋은 결과를 보였습니다. 그러나 연구의 최종 목적은 KPI 예측 자체가 아니라 **예측을 이용해 실제 작업자 배치를 개선하는 것**입니다.
 
 Random Forest는 Holdout에서 40일 모두 기존 Fixed EWA와 같은 정수 배치로 귀결되어 최종 성능 변화가 없었습니다. 반면 XGBoost는 내부검증에서 혼잡 지표를 낮추는 방향의 Adaptive 선택을 보였고, Holdout에서도 최소한 한 날짜에서 기존과 다른 배치를 생성했습니다. 따라서 현재 결과는 **예측 성능 + 최종 배치 의사결정 효과를 함께 볼 때 XGBoost를 주 모델로 유지할 근거**가 됩니다.
+
+---
+
+## 7. 부스팅 모델 벤치마크 (Phase 8-Boosting)
+
+Random Forest 외에도 XGBoost, LightGBM, CatBoost를 동일한 조건에서 비교할 수 있습니다.
+
+자세한 내용은 [Phase 8-Boosting - 부스팅 모델 벤치마크](README_PHASE8_BOOSTING.md)를 참고합니다.
+
+```powershell
+# 세 부스팅 모델 비교 (트리 비부스팅인 Random Forest와 함께)
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw
+```
+
+현재 Phase 8에서 XGBoost를 주 모델로 선택한 근거를 더욱 체계적으로 검증할 수 있습니다.

@@ -4,7 +4,7 @@
 
 Phase 4에서는 Calibration 92일 전체를 기준으로 Pareto-knee를 계산해 **고정 λ*=0.25**를 선택했고, Phase 5에서는 이를 Frozen Holdout 40일에 그대로 적용했습니다.
 
-Phase 8의 목적은 기존 EWA 수식과 정수 작업자 배치 알고리즘을 대체하는 것이 아니라, 날짜별 운영상황에 따라 λ를 동적으로 선택하도록 AI를 결합하는 것입니다.
+Phase 8의 목적은 기존 EWA 수식과 정수 작업자 배치 알고리즘을 대체하는 것이 아니라, **XGBoost 기반 KPI 예측**을 이용해 날짜별 운영상황에 따라 λ를 동적으로 선택하도록 AI를 결합하는 것입니다.
 
 ```text
 운영상태 + λ별 후보 정수배치
@@ -313,3 +313,18 @@ Phase 8의 기여는 “AI가 작업자를 직접 배치한다”가 아닙니�
 > **기존 Entropy 기반 최적화 모형의 고정 λ 한계를 XGBoost 기반 KPI 예측으로 보완하고, Fixed EWA의 예측 Flow를 효율성 guardrail로 유지하면서 날짜별 혼잡 최소 λ를 선택하는 hybrid AI-optimization 구조**입니다.
 
 따라서 Phase 4~6에서 정립한 `D(n)`, `R(n)`, `J(n;λ)`의 이론적 의미와 DES 검증 구조는 유지됩니다.
+
+---
+
+## 14. 부스팅 모델 비교 (Phase 8-Boosting)
+
+XGBoost가 최적의 선택인지 검증하기 위해 동일한 조건에서 **LightGBM과 CatBoost**와 비교할 수 있습니다.
+
+자세한 내용은 [Phase 8-Boosting - 부스팅 모델 벤치마크](README_PHASE8_BOOSTING.md)를 참고합니다.
+
+```powershell
+# 세 부스팅 모델의 KPI 예측 성능과 최종 Holdout 의사결정 비교
+python -m entropy_thesis.simulation.phase8_boosting --data-dir data/raw
+```
+
+현재 Phase 8은 XGBoost를 주 모델로 사용하지만, Phase 8-Boosting에서 다른 모델들도 충분히 좋은 성능을 보인다면 필요에 따라 모델 선택을 재검토할 수 있습니다.
